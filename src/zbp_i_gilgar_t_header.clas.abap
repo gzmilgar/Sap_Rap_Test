@@ -1,0 +1,5 @@
+CLASS zbp_i_gilgar_t_header DEFINITION PUBLIC ABSTRACT FINAL FOR BEHAVIOR OF zi_gilgar_t_header.
+ENDCLASS.
+
+CLASS zbp_i_gilgar_t_header IMPLEMENTATION.
+ENDCLASS.

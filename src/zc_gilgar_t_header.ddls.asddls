@@ -11,6 +11,7 @@ define root view entity ZC_GILGAR_T_HEADER
       Customer,
       CreatedBy,
       CreatedAt,
+      TestButton,
       _Cust.first_name as CustFirstName,
       _Cust.last_name as CustLastName,
       /* Associations */

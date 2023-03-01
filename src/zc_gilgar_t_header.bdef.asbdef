@@ -1,0 +1,19 @@
+projection;
+strict;
+
+define behavior for ZC_GILGAR_T_HEADER alias Header
+{
+  use create;
+  use update;
+  use delete;
+
+  use association _Item { create; }
+}
+
+define behavior for ZC_GILGAR_T_ITEM alias Item
+{
+  use update;
+  use delete;
+
+  use association _Header;
+}

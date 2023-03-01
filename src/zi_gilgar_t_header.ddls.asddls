@@ -18,6 +18,7 @@ define root view entity Zi_GILGAR_T_HEADER
       created_by as CreatedBy,
       @Semantics.systemDateTime.createdAt: true
       created_at as CreatedAt,
+      test_button as TestButton,
       _Item,
       _Cust
 }

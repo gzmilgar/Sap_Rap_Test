@@ -1,0 +1,27 @@
+managed implementation in class zbp_i_gilgar_t_header unique;
+strict;
+
+define behavior for Zi_GILGAR_T_HEADER alias Header
+persistent table zgilgar_t_header
+lock master
+authorization master ( instance )
+//etag master LocalLast
+{
+  create;
+  update;
+  delete;
+  action TestButton result [1] $self;
+  association _Item { create; }
+}
+
+define behavior for Zi_GILGAR_T_ITEM alias Item
+persistent table zgilgar_t_item
+lock dependent by _Header
+authorization dependent by _Header
+//etag master <field_name>
+{
+  update;
+  delete;
+  field ( readonly ) Id;
+  association _Header;
+}
