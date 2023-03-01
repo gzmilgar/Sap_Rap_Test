@@ -13,7 +13,7 @@ define root view entity ZC_GILGAR_T_HEADER
       CreatedAt,
       TestButton,
       _Cust.first_name as CustFirstName,
-      _Cust.last_name as CustLastName,
+      _Cust.last_name  as CustLastName,
       /* Associations */
       _Cust,
       _Item : redirected to composition child ZC_GILGAR_T_ITEM

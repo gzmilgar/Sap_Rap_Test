@@ -7,7 +7,7 @@ define behavior for ZC_GILGAR_T_HEADER alias Header
   use update;
   use delete;
 
-  use association _Item { create; }
+  use association _Item {  }
 }
 
 define behavior for ZC_GILGAR_T_ITEM alias Item

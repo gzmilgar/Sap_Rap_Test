@@ -10,8 +10,19 @@ authorization master ( instance )
   create;
   update;
   delete;
+  field ( features : instance ) Id;
+  field ( readonly  ) CreatedAt;
+  field ( readonly ) CreatedBy;
+
   action TestButton result [1] $self;
-  association _Item { create; }
+  mapping for zgilgar_t_header
+  { Id = id;
+    Customer = customer;
+    TestButton = test_button;
+    CreatedAt = created_at;
+    CreatedBy = created_by;
+  }
+  association _Item { }
 }
 
 define behavior for Zi_GILGAR_T_ITEM alias Item
@@ -23,5 +34,14 @@ authorization dependent by _Header
   update;
   delete;
   field ( readonly ) Id;
+  field ( readonly ) ItemId;
+  action TestButton result [1] $self;
+
+  mapping for zgilgar_t_item
+  { Id = id;
+    ItemId = item_id;
+    Value = value;
+  }
+
   association _Header;
 }
