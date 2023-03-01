@@ -1,5 +1,5 @@
 @EndUserText.label: 'Item Test BO Projection View'
-@AccessControl.authorizationCheck: #NOT_REQUIRED
+//@AccessControl.authorizationCheck: #NOT_REQUIRED
 @Search.searchable: true
 @Metadata.allowExtensions: true
 define view entity ZC_GILGAR_T_ITEM

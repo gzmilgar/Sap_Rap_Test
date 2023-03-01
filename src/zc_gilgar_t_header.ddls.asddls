@@ -1,5 +1,5 @@
 @EndUserText.label: 'Header Test BO Projection View'
-@AccessControl.authorizationCheck: #NOT_REQUIRED
+@AccessControl.authorizationCheck: #CHECK
 @Search.searchable: true
 @Metadata.allowExtensions: true
 define root view entity ZC_GILGAR_T_HEADER
