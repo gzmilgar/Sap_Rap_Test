@@ -11,12 +11,14 @@ authorization master ( instance )
   update;
   delete;
   field ( features : instance ) Id;
+//  field ( readonly ) Id;
   field ( readonly  ) CreatedAt;
   field ( readonly ) CreatedBy;
 
   action TestButton result [1] $self;
   mapping for zgilgar_t_header
-  { Id = id;
+  {
+    Id = id;
     Customer = customer;
     TestButton = test_button;
     CreatedAt = created_at;

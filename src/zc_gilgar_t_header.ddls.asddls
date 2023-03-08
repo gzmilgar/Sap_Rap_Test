@@ -8,6 +8,8 @@ define root view entity ZC_GILGAR_T_HEADER
       @Search.defaultSearchElement: true
   key Id,
       @Search.defaultSearchElement: true
+      @Consumption.valueHelpDefinition: [{ entity : {name: 'ZI_GILGAR_T_CUST',
+      element: 'Customer' } }]
       Customer,
       CreatedBy,
       CreatedAt,

@@ -12,12 +12,12 @@ define root view entity Zi_GILGAR_T_HEADER
   composition [1..*] of Zi_GILGAR_T_ITEM as _Item
   association [1..1] to zgilgar_t_cust   as _Cust on $projection.Customer = _Cust.customer
 {
-  key id         as Id,
-      customer   as Customer,
+  key id          as Id,
+      customer    as Customer,
       @Semantics.user.createdBy: true
-      created_by as CreatedBy,
+      created_by  as CreatedBy,
       @Semantics.systemDateTime.createdAt: true
-      created_at as CreatedAt,
+      created_at  as CreatedAt,
       test_button as TestButton,
       _Item,
       _Cust

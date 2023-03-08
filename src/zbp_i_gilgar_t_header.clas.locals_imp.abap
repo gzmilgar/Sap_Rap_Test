@@ -16,6 +16,14 @@ CLASS lhc_item IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD TestButton.
+    " Modify in local mode
+    MODIFY ENTITIES OF Zi_GILGAR_T_HEADER IN LOCAL MODE
+    ENTITY Header
+    UPDATE FROM VALUE #( FOR key IN keys ( id = key-id
+    TestButton = 'A'
+    %control-TestButton = if_abap_behv=>mk-on ) )
+    FAILED failed
+    REPORTED reported.
   ENDMETHOD.
 
 ENDCLASS.
@@ -27,6 +35,8 @@ CLASS lhc_Header DEFINITION INHERITING FROM cl_abap_behavior_handler.
       IMPORTING keys REQUEST requested_authorizations FOR Header RESULT result.
     METHODS testbutton FOR MODIFY
       IMPORTING keys FOR ACTION header~testbutton RESULT result.
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR header RESULT result.
 
 ENDCLASS.
 
@@ -37,15 +47,14 @@ CLASS lhc_Header IMPLEMENTATION.
 
   METHOD TestButton.
 
-" Modify in local mode
- MODIFY ENTITIES OF Zi_GILGAR_T_HEADER IN LOCAL MODE
- ENTITY Header
- UPDATE FROM VALUE #( for key in keys ( id = key-id
- TestButton = 'A'
- %control-TestButton = if_abap_behv=>mk-on ) )
- FAILED failed
- REPORTED reported.
-
+    " Modify in local mode
+    MODIFY ENTITIES OF Zi_GILGAR_T_HEADER IN LOCAL MODE
+    ENTITY Header
+    UPDATE FROM VALUE #( FOR key IN keys ( id = key-id
+                                            TestButton = 'A'
+                                            %control-TestButton = if_abap_behv=>mk-on ) )
+    FAILED failed
+    REPORTED reported.
 
 *    SELECT MAX( id ) FROM zgilgar_t_header INTO @DATA(lv_id). "#EC CI_NOWHERE
 *
@@ -83,8 +92,11 @@ CLASS lhc_Header IMPLEMENTATION.
 *
 
 
-*  UPDATE zgilgar_t_header set test_button = 'X' WHERE id = '1'.
+    UPDATE zgilgar_t_header SET test_button = 'X' WHERE id = '1'.
 
+  ENDMETHOD.
+
+  METHOD get_instance_features.
   ENDMETHOD.
 
 ENDCLASS.
