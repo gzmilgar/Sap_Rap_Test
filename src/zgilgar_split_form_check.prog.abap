@@ -158,6 +158,18 @@ CLASS lcl_app DEFINITION.
                 ev_c    TYPE i
                 ev_t    TYPE i.
     METHODS display.
+    METHODS on_link_click
+      FOR EVENT link_click OF cl_salv_events_table
+      IMPORTING row column.
+    METHODS on_double_click
+      FOR EVENT double_click OF cl_salv_events_table
+      IMPORTING row column.
+    METHODS navigate
+      IMPORTING iv_type TYPE trobjtype
+                iv_name TYPE string.
+    METHODS nav_for_cell
+      IMPORTING iv_row TYPE i
+                iv_col TYPE string.
 ENDCLASS.
 
 CLASS lcl_app IMPLEMENTATION.
@@ -606,6 +618,17 @@ CLASS lcl_app IMPLEMENTATION.
         lo_cols->get_column( 'Z_SIG'    )->set_short_text( 'Z Sig' ).
         lo_cols->get_column( 'Z_SIG'    )->set_long_text( 'Z-form signature' ).
 
+        " hotspot + cift tiklama ile kaynaga git
+        CAST cl_salv_column_table( lo_cols->get_column( 'SFORM' )
+             )->set_cell_type( if_salv_c_cell_type=>hotspot ).
+        CAST cl_salv_column_table( lo_cols->get_column( 'DFORM' )
+             )->set_cell_type( if_salv_c_cell_type=>hotspot ).
+        CAST cl_salv_column_table( lo_cols->get_column( 'DPROG' )
+             )->set_cell_type( if_salv_c_cell_type=>hotspot ).
+        DATA(lo_events) = lo_alv->get_event( ).
+        SET HANDLER me->on_link_click   FOR lo_events.
+        SET HANDLER me->on_double_click FOR lo_events.
+
         lo_alv->get_display_settings( )->set_list_header(
           |ZSPLIT dinamik PERFORM parametre kontrolu - { lines( mt_result ) } bulgu| ).
 
@@ -614,6 +637,47 @@ CLASS lcl_app IMPLEMENTATION.
       CATCH cx_salv_msg INTO DATA(lx_msg).
         MESSAGE lx_msg->get_text( ) TYPE 'I'.
     ENDTRY.
+  ENDMETHOD.
+
+  METHOD on_link_click.
+    nav_for_cell( iv_row = CONV i( row ) iv_col = CONV string( column ) ).
+  ENDMETHOD.
+
+  METHOD on_double_click.
+    nav_for_cell( iv_row = CONV i( row ) iv_col = CONV string( column ) ).
+  ENDMETHOD.
+
+  METHOD nav_for_cell.
+    DATA(ls) = VALUE #( mt_result[ iv_row ] OPTIONAL ).
+    IF ls IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    CASE iv_col.
+      WHEN 'SFORM' OR 'SPROG' OR 'SRC_KIND'.
+        " kaynak: FM ise SE37, FORM ise kaynak program
+        IF ls-src_kind = 'FM'.
+          navigate( iv_type = 'FUNC' iv_name = ls-sform ).
+        ELSE.
+          navigate( iv_type = 'PROG' iv_name = CONV string( ls-sprog ) ).
+        ENDIF.
+      WHEN OTHERS.
+        " Z split program (duzeltilecek form)
+        navigate( iv_type = 'PROG' iv_name = CONV string( ls-dprog ) ).
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD navigate.
+    IF iv_name IS INITIAL.
+      RETURN.
+    ENDIF.
+    CALL FUNCTION 'RS_TOOL_ACCESS'
+      EXPORTING
+        operation   = 'SHOW'
+        object_name = CONV trobj_name( iv_name )
+        object_type = iv_type
+      EXCEPTIONS
+        OTHERS      = 1.
   ENDMETHOD.
 
 ENDCLASS.

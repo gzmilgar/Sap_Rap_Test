@@ -62,6 +62,14 @@ CLASS lcl_scanner DEFINITION.
       IMPORTING iv_line       TYPE string
       RETURNING VALUE(rv_yes) TYPE abap_bool.
     METHODS display.
+    METHODS on_link_click
+      FOR EVENT link_click OF cl_salv_events_table
+      IMPORTING row column.
+    METHODS on_double_click
+      FOR EVENT double_click OF cl_salv_events_table
+      IMPORTING row column.
+    METHODS navigate_row
+      IMPORTING iv_row TYPE i.
 ENDCLASS.
 
 CLASS lcl_scanner IMPLEMENTATION.
@@ -261,11 +269,51 @@ CLASS lcl_scanner IMPLEMENTATION.
         lo_cols->get_column( 'CODE'   )->set_short_text( 'Code' ).
         lo_cols->get_column( 'CODE'   )->set_long_text( 'Coding' ).
 
+        " cift tiklama / hotspot ile kaynaga git
+        CAST cl_salv_column_table( lo_cols->get_column( 'OBJECT' )
+             )->set_cell_type( if_salv_c_cell_type=>hotspot ).
+        DATA(lo_events) = lo_alv->get_event( ).
+        SET HANDLER me->on_link_click   FOR lo_events.
+        SET HANDLER me->on_double_click FOR lo_events.
+
         lo_alv->display( ).
 
       CATCH cx_salv_msg INTO DATA(lx_msg).
         MESSAGE lx_msg->get_text( ) TYPE 'I'.
     ENDTRY.
+  ENDMETHOD.
+
+  METHOD on_link_click.
+    navigate_row( CONV i( row ) ).
+  ENDMETHOD.
+
+  METHOD on_double_click.
+    navigate_row( CONV i( row ) ).
+  ENDMETHOD.
+
+  METHOD navigate_row.
+    DATA(ls) = VALUE #( mt_result[ iv_row ] OPTIONAL ).
+    IF ls-object IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA lv_type TYPE trobjtype.
+    DATA lv_pos  TYPE i.
+    IF ls-type = 'CLASS METHOD'.
+      lv_type = 'CLAS'.
+    ELSE.
+      lv_type = 'PROG'.
+      lv_pos  = ls-line.
+    ENDIF.
+
+    CALL FUNCTION 'RS_TOOL_ACCESS'
+      EXPORTING
+        operation   = 'SHOW'
+        object_name = CONV trobj_name( ls-object )
+        object_type = lv_type
+        position    = lv_pos
+      EXCEPTIONS
+        OTHERS      = 1.
   ENDMETHOD.
 
 ENDCLASS.
