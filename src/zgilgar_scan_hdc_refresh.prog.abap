@@ -106,13 +106,23 @@ CLASS lcl_scanner IMPLEMENTATION.
       INTO TABLE @DATA(lt_cls)
       WHERE clsname IN @s_name.
 
+    DATA lt_inc TYPE seop_methods_w_include.
+
     LOOP AT lt_cls INTO DATA(ls_cls).
-      TRY.
-          DATA(lt_inc) =
-            cl_oo_classname_service=>get_all_method_includes( ls_cls-clsname ).
-        CATCH cx_root.
-          CONTINUE.
-      ENDTRY.
+      " GET_ALL_METHOD_INCLUDES klasik istisna (CLASS_NOT_EXISTING) firlatir;
+      " sinif-tabanli olmadigi icin CATCH ile degil EXCEPTIONS ile yakalanir.
+      CLEAR lt_inc.
+      CALL METHOD cl_oo_classname_service=>get_all_method_includes
+        EXPORTING
+          clsname            = ls_cls-clsname
+        RECEIVING
+          result             = lt_inc
+        EXCEPTIONS
+          class_not_existing = 1
+          OTHERS             = 2.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
 
       LOOP AT lt_inc INTO DATA(ls_inc).
         DATA(lv_mname) = to_upper( condense( CONV string( ls_inc-cpdkey-cpdname ) ) ).
