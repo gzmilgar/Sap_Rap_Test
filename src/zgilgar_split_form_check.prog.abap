@@ -14,11 +14,21 @@ REPORT zgilgar_split_form_check.
 "& CX_SY_DYN_CALL_PARAM_* dump olur. Upgrade sonrasi exit/FM degisip de
 "& Z form guncellenmediyse bu sayilar tutmaz -> rapor bunu listeler.
 "&
+"& Iki karsilastirma modu (MODE kolonu):
+"&  * PERFORM : sform govdesinde dinamik PERFORM bulundu -> U/C/T sayilari.
+"&  * FM      : PERFORM yok ve kaynak bir function module -> Z form param.
+"&             FM arayuzu (FUPARAREF) ile ISIM bazli karsilastirilir.
+"&
 "& Kaynak PERFORM'un yeri:
 "&  * Customer-exit FM (EXIT_*): FM govdesi -> INCLUDE Zxxx -> dogrudan
 "&    ZBC_FM_SPLIT_FIND + PERFORM. READ REPORT + INCLUDE zinciri ile bulunur.
 "&  * Klasik FORM exit: FORM govdesi / include'u.
-"&  * Enhancement: READ REPORT ile gorulemez. Bu durumda ZBC_FM_SPLIT_FIND
+"&  * Enhancement (form ICINDE): kaynak once CL_WB_PGEDITOR=>READ_SOURCE
+"&    ile enhancement'lar INLINE gomulu okunur; boylece form govdesindeki
+"&    enhancement de form-bazli (SAPMV45A'daki cok sayida userexit gibi)
+"&    tam eslestirilir. (Dinamik cagri; API yoksa READ REPORT'a duser.)
+"&  * Enhancement (cozulemeyen): READ REPORT/READ_SOURCE ile gorulemezse
+"&    ZBC_FM_SPLIT_FIND
 "&    where-used (RS_EU_CROSSREF) ile tum cagri yerleri bulunur; her cagri
 "&    yerindeki include okunup PERFORM imzasi cikarilir ve ana programa
 "&    (ENCL_OBJEC) gore eslestirilir. Bir programda birden fazla FARKLI
@@ -84,6 +94,7 @@ CLASS lcl_app DEFINITION.
              sprog    TYPE programm,
              sform    TYPE string,
              src_kind TYPE string,
+             mode     TYPE string,
              dprog    TYPE programm,
              dform    TYPE string,
              status   TYPE string,
@@ -113,8 +124,16 @@ CLASS lcl_app DEFINITION.
     DATA mt_src     TYPE HASHED TABLE OF ty_src    WITH UNIQUE KEY prog.
     DATA mt_fcache  TYPE HASHED TABLE OF ty_fcache WITH UNIQUE KEY prog form.
     DATA mt_pcache  TYPE HASHED TABLE OF ty_pcache WITH UNIQUE KEY prog form.
-    DATA mt_wu      TYPE HASHED TABLE OF ty_wu     WITH UNIQUE KEY prog.
+    TYPES: BEGIN OF ty_ficache,
+             func   TYPE string,
+             params TYPE tt_param,
+           END OF ty_ficache.
+
+    DATA mt_wu      TYPE HASHED TABLE OF ty_wu      WITH UNIQUE KEY prog.
     DATA mv_wu_done TYPE abap_bool.
+    DATA mo_editor  TYPE REF TO object.
+    DATA mv_ed_fail TYPE abap_bool.
+    DATA mt_ficache TYPE HASHED TABLE OF ty_ficache WITH UNIQUE KEY func.
 
     METHODS get_includes
       IMPORTING iv_prog       TYPE programm
@@ -122,6 +141,9 @@ CLASS lcl_app DEFINITION.
     METHODS read_src
       IMPORTING iv_prog    TYPE programm
       RETURNING VALUE(rt)  TYPE string_table.
+    METHODS read_enhanced
+      IMPORTING iv_prog   TYPE programm
+      RETURNING VALUE(rt) TYPE string_table.
     METHODS strip_comment
       IMPORTING iv_line   TYPE string
       RETURNING VALUE(rv) TYPE string.
@@ -185,6 +207,14 @@ CLASS lcl_app DEFINITION.
                 iv_u    TYPE i
                 iv_c    TYPE i
                 iv_t    TYPE i.
+    METHODS get_fm_interface
+      IMPORTING iv_form         TYPE string
+      RETURNING VALUE(rt_param) TYPE tt_param.
+    METHODS compare_fm
+      IMPORTING it_fm     TYPE tt_param
+                it_z      TYPE tt_param
+      EXPORTING ev_status TYPE string
+                ev_detail TYPE string.
     METHODS display.
     METHODS on_link_click
       FOR EVENT link_click OF cl_salv_events_table
@@ -220,8 +250,6 @@ CLASS lcl_app IMPLEMENTATION.
     build_where_used_map( ).
 
     LOOP AT lt_hdr INTO DATA(ls_hdr).
-      DATA(lv_wu_ambig) = abap_false.
-
       " beklenen: kaynak exit/form icindeki dinamik PERFORM imzasi
       find_perform_sig( EXPORTING iv_prog  = CONV #( ls_hdr-sprog )
                                   iv_form  = CONV #( ls_hdr-sform )
@@ -231,20 +259,6 @@ CLASS lcl_app IMPLEMENTATION.
                                   ev_c     = DATA(lv_pc)
                                   ev_t     = DATA(lv_pt)
                                   ev_raw   = DATA(lv_raw) ).
-
-      " READ REPORT ile bulunamadiysa (enhancement) where-used'a basvur
-      IF lv_pfound = abap_false.
-        READ TABLE mt_wu INTO DATA(ls_wu) WITH KEY prog = CONV programm( ls_hdr-sprog ).
-        IF sy-subrc = 0 AND ls_wu-found = abap_true.
-          IF ls_wu-ambiguous = abap_true.
-            lv_wu_ambig = abap_true.
-          ELSE.
-            lv_pfound = abap_true.
-            lv_pu = ls_wu-u. lv_pc = ls_wu-c. lv_pt = ls_wu-t.
-            lv_raw = |where-used PERFORM: U={ ls_wu-u } C={ ls_wu-c } T={ ls_wu-t }|.
-          ENDIF.
-        ENDIF.
-      ENDIF.
 
       " gerceklesen: Z form formal parametreleri
       get_form_params( EXPORTING iv_prog  = CONV #( ls_hdr-dprog )
@@ -275,19 +289,58 @@ CLASS lcl_app IMPLEMENTATION.
       IF lv_zfound = abap_false.
         ls_res-status = 'ZSPLIT FORM YOK'.
         ls_res-detail = 'Z kopya form bulunamadi'.
-      ELSEIF lv_pfound = abap_false AND lv_wu_ambig = abap_true.
-        ls_res-status = 'ENHANCEMENT BELIRSIZ'.
-        ls_res-detail = 'where-used: programda birden fazla farkli PERFORM imzasi - manuel kontrol'.
-      ELSEIF lv_pfound = abap_false.
-        ls_res-status = 'PERFORM BULUNAMADI'.
-        ls_res-detail = 'Kaynaktaki dinamik PERFORM okunamadi (enhancement icinde olabilir)'.
-      ELSEIF lv_pu = lv_zu AND lv_pc = lv_zc AND lv_pt = lv_zt.
-        ls_res-status = 'ESLESIYOR'.
-        lv_ok = abap_true.
+
+      ELSEIF lv_pfound = abap_true.
+        " --- PERFORM modu: sform govdesindeki dinamik PERFORM ---
+        ls_res-mode = 'PERFORM'.
+        IF lv_pu = lv_zu AND lv_pc = lv_zc AND lv_pt = lv_zt.
+          ls_res-status = 'ESLESIYOR'.
+          lv_ok = abap_true.
+        ELSE.
+          ls_res-status = 'PARAMETRE UYUSMUYOR'.
+          ls_res-detail = |PERFORM[U={ lv_pu } C={ lv_pc } T={ lv_pt }]| &&
+                          | <> Zform[U={ lv_zu } C={ lv_zc } T={ lv_zt }]|.
+        ENDIF.
+
+      ELSEIF lv_kind = 'FM'.
+        " --- FM arayuzu modu: PERFORM yok, kaynak bir function module ---
+        DATA(lt_fm) = get_fm_interface( CONV #( ls_hdr-sform ) ).
+        IF lt_fm IS NOT INITIAL.
+          ls_res-mode = 'FM'.
+          compare_fm( EXPORTING it_fm     = lt_fm
+                                it_z      = lt_z
+                      IMPORTING ev_status = ls_res-status
+                                ev_detail = ls_res-detail ).
+          IF ls_res-status = 'ESLESIYOR'.
+            lv_ok = abap_true.
+          ENDIF.
+        ELSE.
+          ls_res-status = 'PERFORM BULUNAMADI'.
+          ls_res-detail = 'Dinamik PERFORM yok, FM arayuzu da okunamadi'.
+        ENDIF.
+
       ELSE.
-        ls_res-status = 'PARAMETRE UYUSMUYOR'.
-        ls_res-detail = |PERFORM[U={ lv_pu } C={ lv_pc } T={ lv_pt }]| &&
-                        | <> Zform[U={ lv_zu } C={ lv_zc } T={ lv_zt }]|.
+        " --- FORM ama govdesinde PERFORM yok -> where-used (program) fallback ---
+        READ TABLE mt_wu INTO DATA(ls_wu) WITH KEY prog = CONV programm( ls_hdr-sprog ).
+        IF sy-subrc = 0 AND ls_wu-found = abap_true AND ls_wu-ambiguous = abap_true.
+          ls_res-status = 'ENHANCEMENT BELIRSIZ'.
+          ls_res-detail = 'where-used: programda birden fazla farkli PERFORM imzasi - manuel kontrol'.
+        ELSEIF sy-subrc = 0 AND ls_wu-found = abap_true.
+          ls_res-mode = 'PERFORM'.
+          ls_res-perf_u = ls_wu-u. ls_res-perf_c = ls_wu-c. ls_res-perf_t = ls_wu-t.
+          ls_res-perf_raw = |where-used PERFORM: U={ ls_wu-u } C={ ls_wu-c } T={ ls_wu-t }|.
+          IF ls_wu-u = lv_zu AND ls_wu-c = lv_zc AND ls_wu-t = lv_zt.
+            ls_res-status = 'ESLESIYOR'.
+            lv_ok = abap_true.
+          ELSE.
+            ls_res-status = 'PARAMETRE UYUSMUYOR'.
+            ls_res-detail = |PERFORM[U={ ls_wu-u } C={ ls_wu-c } T={ ls_wu-t }]| &&
+                            | <> Zform[U={ lv_zu } C={ lv_zc } T={ lv_zt }]|.
+          ENDIF.
+        ELSE.
+          ls_res-status = 'PERFORM BULUNAMADI'.
+          ls_res-detail = 'Kaynaktaki dinamik PERFORM okunamadi (enhancement icinde olabilir)'.
+        ENDIF.
       ENDIF.
 
       ls_res-t_color = VALUE #( ( fname = space
@@ -334,8 +387,58 @@ CLASS lcl_app IMPLEMENTATION.
       rt = ls-src.
       RETURN.
     ENDIF.
-    READ REPORT iv_prog INTO rt.
+
+    " Once enhancement'lar inline gomulu kaynagi dene (SAPMV45A gibi form
+    " icindeki ZBC_FM_SPLIT_FIND enhancement'lari boylece form-bazli yakalanir),
+    " olmazsa ham READ REPORT.
+    rt = read_enhanced( iv_prog ).
+    IF rt IS INITIAL.
+      READ REPORT iv_prog INTO rt.
+    ENDIF.
+
     INSERT VALUE #( prog = iv_prog src = rt ) INTO TABLE mt_src.
+  ENDMETHOD.
+
+  METHOD read_enhanced.
+    " CL_WB_PGEDITOR=>READ_SOURCE enhancement'lari satir arasina gomer.
+    " API tipinden bagimsiz kalmak icin dinamik cagrilir; hata olursa
+    " bir daha denenmez ve READ REPORT'a dusulur.
+    IF mv_ed_fail = abap_true.
+      RETURN.
+    ENDIF.
+
+    TRY.
+        IF mo_editor IS NOT BOUND.
+          CREATE OBJECT mo_editor TYPE ('CL_WB_PGEDITOR')
+            EXPORTING p_is_in_adjustment_mode = abap_false.
+        ENDIF.
+
+        DATA lr_tab TYPE REF TO data.
+        CREATE DATA lr_tab TYPE ('SEDI_SOURCE').
+        ASSIGN lr_tab->* TO FIELD-SYMBOL(<tab>).
+
+        CALL METHOD mo_editor->('READ_SOURCE')
+          EXPORTING
+            source_name            = iv_prog
+            with_impl_enhancements = abap_true
+          IMPORTING
+            source_tab             = <tab>
+          EXCEPTIONS
+            OTHERS                 = 1.
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+
+        LOOP AT <tab> ASSIGNING FIELD-SYMBOL(<ln>).
+          DATA lv_line TYPE string.
+          lv_line = <ln>.
+          APPEND lv_line TO rt.
+        ENDLOOP.
+
+      CATCH cx_root.
+        mv_ed_fail = abap_true.       " API yok/uyumsuz -> bir daha deneme
+        CLEAR rt.
+    ENDTRY.
   ENDMETHOD.
 
   METHOD strip_comment.
@@ -717,6 +820,71 @@ CLASS lcl_app IMPLEMENTATION.
     ENDLOOP.
   ENDMETHOD.
 
+  METHOD get_fm_interface.
+    " User-exit/FM kaynaginda dinamik PERFORM yoksa: FM'in parametre
+    " arayuzu FUPARAREF'ten okunur (Z form bunlari ayni isimle kopyalar).
+    DATA(lv_func_s) = to_upper( condense( iv_form ) ).
+    READ TABLE mt_ficache INTO DATA(ls_c) WITH KEY func = lv_func_s.
+    IF sy-subrc = 0.
+      rt_param = ls_c-params.
+      RETURN.
+    ENDIF.
+
+    DATA lv_func TYPE rs38l_fnam.
+    lv_func = lv_func_s.
+    SELECT parameter, paramtype, structure
+      FROM fupararef
+      INTO TABLE @DATA(lt_fp)
+      WHERE funcname = @lv_func
+        AND r3state  = 'A'.
+    IF sy-subrc = 0.
+      LOOP AT lt_fp INTO DATA(ls_fp).
+        DATA(lv_k) = SWITCH string( ls_fp-paramtype
+                       WHEN 'I' THEN 'IMPORTING'
+                       WHEN 'E' THEN 'EXPORTING'
+                       WHEN 'C' THEN 'CHANGING'
+                       WHEN 'T' THEN 'TABLES'
+                       ELSE space ).
+        IF lv_k IS INITIAL.
+          CONTINUE.                               " exception vs.
+        ENDIF.
+        APPEND VALUE #( kind = lv_k
+                        name = to_upper( CONV string( ls_fp-parameter ) )
+                        type = to_upper( CONV string( ls_fp-structure ) ) ) TO rt_param.
+      ENDLOOP.
+    ENDIF.
+
+    INSERT VALUE #( func = lv_func_s params = rt_param ) INTO TABLE mt_ficache.
+  ENDMETHOD.
+
+  METHOD compare_fm.
+    " Z form parametrelerini (it_z) kaynak FM arayuzu (it_fm) ile ISIM bazli
+    " karsilastir. Kind (USING/IMPORTING...) yok sayilir; enhancement FM
+    " importing/exporting parametrelerini USING ile geciyor.
+    DATA lt_issue   TYPE string_table.
+    DATA lv_missing TYPE abap_bool.
+
+    LOOP AT it_z INTO DATA(ls_z).
+      READ TABLE it_fm INTO DATA(ls_s) WITH KEY name = ls_z-name.
+      IF sy-subrc <> 0.
+        APPEND |'{ ls_z-name }' kaynak FM arayuzunde yok| TO lt_issue.
+        lv_missing = abap_true.
+      ELSEIF ls_z-type IS NOT INITIAL AND ls_s-type IS NOT INITIAL
+         AND ls_z-type <> ls_s-type.
+        APPEND |'{ ls_z-name }' tip farkli: FM[{ ls_s-type }] <> Z[{ ls_z-type }]| TO lt_issue.
+      ENDIF.
+    ENDLOOP.
+
+    IF lt_issue IS INITIAL.
+      ev_status = 'ESLESIYOR'.
+    ELSEIF lv_missing = abap_true.
+      ev_status = 'PARAMETRE UYUSMUYOR'.
+    ELSE.
+      ev_status = 'TIP FARKLI'.
+    ENDIF.
+    ev_detail = concat_lines_of( table = lt_issue sep = `; ` ).
+  ENDMETHOD.
+
   METHOD display.
     IF mt_result IS INITIAL.
       MESSAGE 'Uyusmayan kayit bulunamadi (hepsi eslesiyor).' TYPE 'I'.
@@ -736,6 +904,7 @@ CLASS lcl_app IMPLEMENTATION.
         lo_cols->get_column( 'SPROG'    )->set_short_text( 'Src Prog' ).
         lo_cols->get_column( 'SFORM'    )->set_short_text( 'Src Form' ).
         lo_cols->get_column( 'SRC_KIND' )->set_short_text( 'Src Kind' ).
+        lo_cols->get_column( 'MODE'     )->set_short_text( 'Mode' ).
         lo_cols->get_column( 'DPROG'    )->set_short_text( 'Z Prog' ).
         lo_cols->get_column( 'DFORM'    )->set_short_text( 'Z Form' ).
         lo_cols->get_column( 'STATUS'   )->set_short_text( 'Status' ).
