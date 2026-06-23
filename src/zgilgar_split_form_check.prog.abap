@@ -12,11 +12,19 @@ REPORT zgilgar_split_form_check.
 "& eslesmeyen (veya kaynagi/kopya formu artik bulunamayan) kayitlari
 "& listeler.
 "&
-"& Karsilastirma POZISYONELdir (PERFORM cagrisi pozisyonel oldugu icin):
-"& parametre adlari yok sayilir, kind (TABLES/USING/CHANGING) + tip
-"& referansi karsilastirilir. DDIC yapilarinin (LIPS, LIKP...) ic alan
-"& degisiklikleri bu statik karsilastirma ile yakalanmaz - sadece
-"& parametre eklenmesi/cikarilmasi/tip referansi degisimi yakalanir.
+"& Kaynak iki turlu olabilir:
+"&  * FORM  : SPROG/SFORM klasik subroutine. Karsilastirma POZISYONELdir
+"&           (PERFORM pozisyonel): ad yok sayilir, kind + tip karsilastirilir.
+"&  * FM    : SPROG bir SAPL* function-grup main programi ise SFORM bir
+"&           function module adidir. FM arayuzu FUPARAREF'ten okunur.
+"&           Enhancement icinde ZBC_FM_SPLIT_FIND ile bulunan formlara
+"&           PERFORM (dform) IN PROGRAM (dprog) USING ... cagrisi FM
+"&           parametrelerini AYNI ISIMLE gectiginden, Z form parametreleri
+"&           FM arayuzu ile ISIM BAZLI karsilastirilir.
+"&
+"& DDIC yapilarinin (LIPS, LIKP...) ic alan degisiklikleri bu statik
+"& karsilastirma ile yakalanmaz - parametre eklenmesi/cikarilmasi/yeniden
+"& adlandirilmasi ve tip referansi degisimi yakalanir.
 "&
 "& NOT: Tablo adi kuruluma gore degisebilir; gerekirse ZWBC0001_SPLTHDR
 "&      satirini kendi tablonuzla degistirin.
@@ -49,6 +57,7 @@ CLASS lcl_app DEFINITION.
              prog   TYPE programm,
              form   TYPE string,
              found  TYPE abap_bool,
+             kind   TYPE string,        " FORM / FM
              params TYPE tt_param,
            END OF ty_cache.
 
@@ -58,10 +67,11 @@ CLASS lcl_app DEFINITION.
            END OF ty_inc.
 
     TYPES: BEGIN OF ty_result,
-             sprog   TYPE programm,
-             sform   TYPE string,
-             dprog   TYPE programm,
-             dform   TYPE string,
+             sprog    TYPE programm,
+             sform    TYPE string,
+             src_kind TYPE string,
+             dprog    TYPE programm,
+             dform    TYPE string,
              status  TYPE string,
              detail  TYPE string,
              src_cnt TYPE i,
@@ -82,7 +92,13 @@ CLASS lcl_app DEFINITION.
       IMPORTING iv_prog  TYPE programm
                 iv_form  TYPE string
       EXPORTING et_param TYPE tt_param
-                ev_found TYPE abap_bool.
+                ev_found TYPE abap_bool
+                ev_kind  TYPE string.
+    METHODS compare_fm
+      IMPORTING it_src    TYPE tt_param
+                it_dst    TYPE tt_param
+      EXPORTING ev_status TYPE string
+                ev_detail TYPE string.
     METHODS strip_comment
       IMPORTING iv_line   TYPE string
       RETURNING VALUE(rv) TYPE string.
@@ -126,32 +142,43 @@ CLASS lcl_app IMPLEMENTATION.
       get_signature( EXPORTING iv_prog  = CONV #( ls_hdr-sprog )
                                iv_form  = CONV #( ls_hdr-sform )
                      IMPORTING et_param = DATA(lt_src)
-                               ev_found = DATA(lv_src_found) ).
+                               ev_found = DATA(lv_src_found)
+                               ev_kind  = DATA(lv_src_kind) ).
       get_signature( EXPORTING iv_prog  = CONV #( ls_hdr-dprog )
                                iv_form  = CONV #( ls_hdr-dform )
                      IMPORTING et_param = DATA(lt_dst)
                                ev_found = DATA(lv_dst_found) ).
 
       DATA(ls_res) = VALUE ty_result(
-        sprog   = ls_hdr-sprog
-        sform   = ls_hdr-sform
-        dprog   = ls_hdr-dprog
-        dform   = ls_hdr-dform
-        src_cnt = lines( lt_src )
-        dst_cnt = lines( lt_dst )
-        src_sig = build_human( lt_src )
-        dst_sig = build_human( lt_dst ) ).
+        sprog    = ls_hdr-sprog
+        sform    = ls_hdr-sform
+        src_kind = lv_src_kind
+        dprog    = ls_hdr-dprog
+        dform    = ls_hdr-dform
+        src_cnt  = lines( lt_src )
+        dst_cnt  = lines( lt_dst )
+        src_sig  = build_human( lt_src )
+        dst_sig  = build_human( lt_dst ) ).
 
       DATA(lv_ok) = abap_false.
       IF lv_src_found = abap_false AND lv_dst_found = abap_false.
-        ls_res-status = 'HER IKI FORM DA YOK'.
-        ls_res-detail = 'Kaynak ve zsplit form bulunamadi'.
+        ls_res-status = 'HER IKI TARAF DA YOK'.
+        ls_res-detail = 'Kaynak FORM/FM ve zsplit form bulunamadi'.
       ELSEIF lv_src_found = abap_false.
-        ls_res-status = 'KAYNAK FORM YOK'.
-        ls_res-detail = 'Standart form bulunamadi (upgrade ile silinmis/yeniden adlandirilmis olabilir)'.
+        ls_res-status = 'KAYNAK FORM/FM YOK'.
+        ls_res-detail = 'Standart form/FM bulunamadi (upgrade ile silinmis/yeniden adlandirilmis olabilir)'.
       ELSEIF lv_dst_found = abap_false.
         ls_res-status = 'ZSPLIT FORM YOK'.
         ls_res-detail = 'Z kopya form bulunamadi'.
+      ELSEIF lv_src_kind = 'FM'.
+        " kaynak FM -> Z form parametreleri isim bazli karsilastirilir
+        compare_fm( EXPORTING it_src    = lt_src
+                              it_dst    = lt_dst
+                    IMPORTING ev_status = ls_res-status
+                              ev_detail = ls_res-detail ).
+        IF ls_res-status = 'ESLESIYOR'.
+          lv_ok = abap_true.
+        ENDIF.
       ELSEIF build_norm( lt_src ) = build_norm( lt_dst ).
         ls_res-status = 'ESLESIYOR'.
         lv_ok = abap_true.
@@ -209,10 +236,11 @@ CLASS lcl_app IMPLEMENTATION.
     IF sy-subrc = 0.
       et_param = ls_cache-params.
       ev_found = ls_cache-found.
+      ev_kind  = ls_cache-kind.
       RETURN.
     ENDIF.
 
-    CLEAR: et_param, ev_found.
+    CLEAR: et_param, ev_found, ev_kind.
     DATA(lt_inc) = get_includes( iv_prog ).
 
     LOOP AT lt_inc INTO DATA(lv_inc).
@@ -233,6 +261,7 @@ CLASS lcl_app IMPLEMENTATION.
           DATA(lv_header) = read_header( it_src = lt_src iv_start = lv_idx ).
           et_param = parse_header( lv_header ).
           ev_found = abap_true.
+          ev_kind  = 'FORM'.
           EXIT.
         ENDIF.
       ENDLOOP.
@@ -242,9 +271,43 @@ CLASS lcl_app IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
 
+    " FORM bulunamadi -> SFORM bir function module olabilir.
+    " (SAPL* programlari function grup main programidir; SFORM = FM adi.)
+    " FM arayuzu FUPARAREF'ten okunur; enhancement icindeki
+    " PERFORM (dform) IN PROGRAM (dprog) USING ... cagrisi FM parametrelerini
+    " ayni isimle gectiginden Z form ile isim bazli karsilastirilir.
+    IF ev_found = abap_false.
+      DATA lv_func TYPE rs38l_fnam.
+      lv_func = lv_form_u.
+      SELECT parameter, paramtype, structure
+        FROM fupararef
+        INTO TABLE @DATA(lt_fp)
+        WHERE funcname = @lv_func
+          AND r3state  = 'A'.
+      IF sy-subrc = 0.
+        LOOP AT lt_fp INTO DATA(ls_fp).
+          DATA(lv_k) = SWITCH string( ls_fp-paramtype
+                         WHEN 'I' THEN 'IMPORTING'
+                         WHEN 'E' THEN 'EXPORTING'
+                         WHEN 'C' THEN 'CHANGING'
+                         WHEN 'T' THEN 'TABLES'
+                         ELSE space ).
+          IF lv_k IS INITIAL.
+            CONTINUE.                          " exception vs.
+          ENDIF.
+          APPEND VALUE #( kind = lv_k
+                          name = to_upper( CONV string( ls_fp-parameter ) )
+                          type = to_upper( CONV string( ls_fp-structure ) ) ) TO et_param.
+        ENDLOOP.
+        ev_found = abap_true.
+        ev_kind  = 'FM'.
+      ENDIF.
+    ENDIF.
+
     INSERT VALUE #( prog   = iv_prog
                     form   = lv_form_u
                     found  = ev_found
+                    kind   = ev_kind
                     params = et_param ) INTO TABLE mt_cache.
   ENDMETHOD.
 
@@ -372,6 +435,35 @@ CLASS lcl_app IMPLEMENTATION.
     rv = 'Tip/siralama farki'.
   ENDMETHOD.
 
+  METHOD compare_fm.
+    " Z form parametrelerini (it_dst) kaynak FM arayuzu (it_src) ile isim
+    " bazli karsilastir. Kind (USING/IMPORTING...) yok sayilir; cunku
+    " enhancement FM importing/exporting parametrelerini USING ile geciyor.
+    " Z form FM'in alt kumesini kullandigindan ters yon kontrol edilmez.
+    DATA lt_issue   TYPE string_table.
+    DATA lv_missing TYPE abap_bool.
+
+    LOOP AT it_dst INTO DATA(ls_d).
+      READ TABLE it_src INTO DATA(ls_s) WITH KEY name = ls_d-name.
+      IF sy-subrc <> 0.
+        APPEND |'{ ls_d-name }' kaynak FM arayuzunde yok| TO lt_issue.
+        lv_missing = abap_true.
+      ELSEIF ls_d-type IS NOT INITIAL AND ls_s-type IS NOT INITIAL
+         AND ls_d-type <> ls_s-type.
+        APPEND |'{ ls_d-name }' tip farkli: FM[{ ls_s-type }] <> Z[{ ls_d-type }]| TO lt_issue.
+      ENDIF.
+    ENDLOOP.
+
+    IF lt_issue IS INITIAL.
+      ev_status = 'ESLESIYOR'.
+    ELSEIF lv_missing = abap_true.
+      ev_status = 'PARAMETRE UYUSMUYOR'.
+    ELSE.
+      ev_status = 'TIP FARKLI'.
+    ENDIF.
+    ev_detail = concat_lines_of( table = lt_issue sep = `; ` ).
+  ENDMETHOD.
+
   METHOD display.
     IF mt_result IS INITIAL.
       MESSAGE 'Uyusmayan form bulunamadi (tum imzalar eslesiyor).' TYPE 'I'.
@@ -389,8 +481,9 @@ CLASS lcl_app IMPLEMENTATION.
         lo_cols->set_optimize( abap_true ).
         lo_cols->set_color_column( 'T_COLOR' ).
 
-        lo_cols->get_column( 'SPROG'   )->set_short_text( 'Src Prog' ).
-        lo_cols->get_column( 'SFORM'   )->set_short_text( 'Src Form' ).
+        lo_cols->get_column( 'SPROG'    )->set_short_text( 'Src Prog' ).
+        lo_cols->get_column( 'SFORM'    )->set_short_text( 'Src Form' ).
+        lo_cols->get_column( 'SRC_KIND' )->set_short_text( 'Src Kind' ).
         lo_cols->get_column( 'DPROG'   )->set_short_text( 'Z Prog' ).
         lo_cols->get_column( 'DFORM'   )->set_short_text( 'Z Form' ).
         lo_cols->get_column( 'STATUS'  )->set_short_text( 'Status' ).
