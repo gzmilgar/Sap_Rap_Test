@@ -133,12 +133,16 @@ CLASS lcl_app DEFINITION.
                 iv_form  TYPE string
       EXPORTING et_param TYPE tt_param
                 ev_found TYPE abap_bool.
+    METHODS get_fm_prog
+      IMPORTING iv_form   TYPE string
+      EXPORTING ev_is_fm  TYPE abap_bool
+                ev_prog   TYPE programm.
     METHODS collect_unit_source
-      IMPORTING iv_prog  TYPE programm
-                iv_form  TYPE string
-      EXPORTING et_src   TYPE string_table
-                ev_found TYPE abap_bool
-                ev_kind  TYPE string.
+      IMPORTING iv_prog    TYPE programm
+                iv_form    TYPE string
+                iv_keyword TYPE string
+      EXPORTING et_src     TYPE string_table
+                ev_found   TYPE abap_bool.
     METHODS find_perform_sig
       IMPORTING iv_prog  TYPE programm
                 iv_form  TYPE string
@@ -408,13 +412,25 @@ CLASS lcl_app IMPLEMENTATION.
     ENDLOOP.
   ENDMETHOD.
 
+  METHOD get_fm_prog.
+    CLEAR: ev_is_fm, ev_prog.
+    DATA lv_func TYPE rs38l_fnam.
+    lv_func = to_upper( condense( iv_form ) ).
+    SELECT SINGLE pname FROM tfdir INTO @DATA(lv_pname) WHERE funcname = @lv_func.
+    IF sy-subrc = 0.
+      ev_is_fm = abap_true.
+      ev_prog  = lv_pname.
+    ENDIF.
+  ENDMETHOD.
+
   METHOD collect_unit_source.
-    CLEAR: et_src, ev_found, ev_kind.
+    CLEAR: et_src, ev_found.
     DATA(lv_form_u) = to_upper( condense( iv_form ) ).
+    DATA(lv_end)    = |END{ iv_keyword }|.
     DATA lt_worklist TYPE string_table.
     DATA lt_visited  TYPE string_table.
 
-    " 1) FUNCTION/FORM <iv_form> govdesini bul
+    " 1) <iv_keyword> <iv_form> govdesini bul (FUNCTION ya da FORM)
     LOOP AT get_includes( iv_prog ) INTO DATA(lv_inc).
       DATA(lt_src)    = read_src( lv_inc ).
       DATA(lv_in_unit) = abap_false.
@@ -424,14 +440,13 @@ CLASS lcl_app IMPLEMENTATION.
         DATA(lv_w2) = word_at( it_w = lt_w iv_idx = 2 ).
 
         IF lv_in_unit = abap_false.
-          IF ( lv_w1 = 'FUNCTION' OR lv_w1 = 'FORM' ) AND lv_w2 = lv_form_u.
+          IF lv_w1 = iv_keyword AND lv_w2 = lv_form_u.
             lv_in_unit = abap_true.
             ev_found   = abap_true.
-            ev_kind    = COND #( WHEN lv_w1 = 'FUNCTION' THEN 'FM' ELSE 'FORM' ).
             APPEND lv_line TO et_src.
           ENDIF.
         ELSE.
-          IF lv_w1 = 'ENDFUNCTION' OR lv_w1 = 'ENDFORM'.
+          IF lv_w1 = lv_end.
             EXIT.
           ENDIF.
           APPEND lv_line TO et_src.
@@ -483,11 +498,31 @@ CLASS lcl_app IMPLEMENTATION.
 
     CLEAR: ev_found, ev_kind, ev_u, ev_c, ev_t, ev_raw.
 
-    collect_unit_source( EXPORTING iv_prog  = iv_prog
-                                   iv_form  = iv_form
-                         IMPORTING et_src   = DATA(lt_comb)
-                                   ev_found = DATA(lv_unit)
-                                   ev_kind  = ev_kind ).
+    " Kaynagi sinifla: sform once TFDIR'de FM mi? FM ise FM'in gercek
+    " function-grup programinda (PNAME) aranir; degilse FORM olarak sprog'ta.
+    " FORM da bulunamazsa FM kabul edilir (bos -> FM).
+    get_fm_prog( EXPORTING iv_form  = iv_form
+                 IMPORTING ev_is_fm = DATA(lv_is_fm)
+                           ev_prog  = DATA(lv_fm_prog) ).
+
+    DATA lt_comb TYPE string_table.
+    DATA lv_unit TYPE abap_bool.
+
+    IF lv_is_fm = abap_true.
+      ev_kind = 'FM'.
+      collect_unit_source( EXPORTING iv_prog    = lv_fm_prog
+                                     iv_form    = iv_form
+                                     iv_keyword = 'FUNCTION'
+                           IMPORTING et_src     = lt_comb
+                                     ev_found   = lv_unit ).
+    ELSE.
+      collect_unit_source( EXPORTING iv_prog    = iv_prog
+                                     iv_form    = iv_form
+                                     iv_keyword = 'FORM'
+                           IMPORTING et_src     = lt_comb
+                                     ev_found   = lv_unit ).
+      ev_kind = COND #( WHEN lv_unit = abap_true THEN 'FORM' ELSE 'FM' ).
+    ENDIF.
 
     IF lv_unit = abap_true.
       LOOP AT lt_comb INTO DATA(lv_line).
