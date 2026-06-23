@@ -18,8 +18,11 @@ REPORT zgilgar_split_form_check.
 "&  * Customer-exit FM (EXIT_*): FM govdesi -> INCLUDE Zxxx -> dogrudan
 "&    ZBC_FM_SPLIT_FIND + PERFORM. READ REPORT + INCLUDE zinciri ile bulunur.
 "&  * Klasik FORM exit: FORM govdesi / include'u.
-"&  * Enhancement: (su an best-effort) READ REPORT ile gorulemez -> bu
-"&    satirlar 'PERFORM BULUNAMADI' olarak isaretlenir.
+"&  * Enhancement: READ REPORT ile gorulemez. Bu durumda ZBC_FM_SPLIT_FIND
+"&    where-used (RS_EU_CROSSREF) ile tum cagri yerleri bulunur; her cagri
+"&    yerindeki include okunup PERFORM imzasi cikarilir ve ana programa
+"&    (ENCL_OBJEC) gore eslestirilir. Bir programda birden fazla FARKLI
+"&    imza varsa 'ENHANCEMENT BELIRSIZ' (manuel kontrol) isaretlenir.
 "&
 "& sform'a gore CAPALANIR (bir function grupta birden cok exit ve farkli
 "& PERFORM imzasi olabilir).
@@ -97,10 +100,21 @@ CLASS lcl_app DEFINITION.
            END OF ty_result.
 
     DATA mt_result TYPE STANDARD TABLE OF ty_result.
-    DATA mt_inc    TYPE HASHED TABLE OF ty_inc    WITH UNIQUE KEY prog.
-    DATA mt_src    TYPE HASHED TABLE OF ty_src    WITH UNIQUE KEY prog.
-    DATA mt_fcache TYPE HASHED TABLE OF ty_fcache WITH UNIQUE KEY prog form.
-    DATA mt_pcache TYPE HASHED TABLE OF ty_pcache WITH UNIQUE KEY prog form.
+    TYPES: BEGIN OF ty_wu,
+             prog      TYPE programm,
+             found     TYPE abap_bool,
+             u         TYPE i,
+             c         TYPE i,
+             t         TYPE i,
+             ambiguous TYPE abap_bool,
+           END OF ty_wu.
+
+    DATA mt_inc     TYPE HASHED TABLE OF ty_inc    WITH UNIQUE KEY prog.
+    DATA mt_src     TYPE HASHED TABLE OF ty_src    WITH UNIQUE KEY prog.
+    DATA mt_fcache  TYPE HASHED TABLE OF ty_fcache WITH UNIQUE KEY prog form.
+    DATA mt_pcache  TYPE HASHED TABLE OF ty_pcache WITH UNIQUE KEY prog form.
+    DATA mt_wu      TYPE HASHED TABLE OF ty_wu     WITH UNIQUE KEY prog.
+    DATA mv_wu_done TYPE abap_bool.
 
     METHODS get_includes
       IMPORTING iv_prog       TYPE programm
@@ -157,6 +171,20 @@ CLASS lcl_app DEFINITION.
       EXPORTING ev_u    TYPE i
                 ev_c    TYPE i
                 ev_t    TYPE i.
+    METHODS scan_perform
+      IMPORTING it_src   TYPE string_table
+                iv_from  TYPE i DEFAULT 1
+      EXPORTING ev_found TYPE abap_bool
+                ev_u     TYPE i
+                ev_c     TYPE i
+                ev_t     TYPE i
+                ev_raw   TYPE string.
+    METHODS build_where_used_map.
+    METHODS add_wu
+      IMPORTING iv_prog TYPE programm
+                iv_u    TYPE i
+                iv_c    TYPE i
+                iv_t    TYPE i.
     METHODS display.
     METHODS on_link_click
       FOR EVENT link_click OF cl_salv_events_table
@@ -188,7 +216,12 @@ CLASS lcl_app IMPLEMENTATION.
       RETURN.
     ENDIF.
 
+    " ZBC_FM_SPLIT_FIND where-used haritasi (enhancement icindeki cagrilar icin)
+    build_where_used_map( ).
+
     LOOP AT lt_hdr INTO DATA(ls_hdr).
+      DATA(lv_wu_ambig) = abap_false.
+
       " beklenen: kaynak exit/form icindeki dinamik PERFORM imzasi
       find_perform_sig( EXPORTING iv_prog  = CONV #( ls_hdr-sprog )
                                   iv_form  = CONV #( ls_hdr-sform )
@@ -198,6 +231,20 @@ CLASS lcl_app IMPLEMENTATION.
                                   ev_c     = DATA(lv_pc)
                                   ev_t     = DATA(lv_pt)
                                   ev_raw   = DATA(lv_raw) ).
+
+      " READ REPORT ile bulunamadiysa (enhancement) where-used'a basvur
+      IF lv_pfound = abap_false.
+        READ TABLE mt_wu INTO DATA(ls_wu) WITH KEY prog = CONV programm( ls_hdr-sprog ).
+        IF sy-subrc = 0 AND ls_wu-found = abap_true.
+          IF ls_wu-ambiguous = abap_true.
+            lv_wu_ambig = abap_true.
+          ELSE.
+            lv_pfound = abap_true.
+            lv_pu = ls_wu-u. lv_pc = ls_wu-c. lv_pt = ls_wu-t.
+            lv_raw = |where-used PERFORM: U={ ls_wu-u } C={ ls_wu-c } T={ ls_wu-t }|.
+          ENDIF.
+        ENDIF.
+      ENDIF.
 
       " gerceklesen: Z form formal parametreleri
       get_form_params( EXPORTING iv_prog  = CONV #( ls_hdr-dprog )
@@ -228,6 +275,9 @@ CLASS lcl_app IMPLEMENTATION.
       IF lv_zfound = abap_false.
         ls_res-status = 'ZSPLIT FORM YOK'.
         ls_res-detail = 'Z kopya form bulunamadi'.
+      ELSEIF lv_pfound = abap_false AND lv_wu_ambig = abap_true.
+        ls_res-status = 'ENHANCEMENT BELIRSIZ'.
+        ls_res-detail = 'where-used: programda birden fazla farkli PERFORM imzasi - manuel kontrol'.
       ELSEIF lv_pfound = abap_false.
         ls_res-status = 'PERFORM BULUNAMADI'.
         ls_res-detail = 'Kaynaktaki dinamik PERFORM okunamadi (enhancement icinde olabilir)'.
@@ -537,22 +587,12 @@ CLASS lcl_app IMPLEMENTATION.
     ENDIF.
 
     IF lv_unit = abap_true.
-      LOOP AT lt_comb INTO DATA(lv_line).
-        DATA(lv_idx) = sy-tabix.
-        DATA(lt_w)   = words( lv_line ).
-        IF word_at( it_w = lt_w iv_idx = 1 ) = 'PERFORM'.
-          DATA(lv_stmt) = read_stmt( it_src = lt_comb iv_start = lv_idx ).
-          IF lv_stmt CS 'IN PROGRAM'.
-            parse_perform_counts( EXPORTING iv_stmt = lv_stmt
-                                  IMPORTING ev_u    = ev_u
-                                            ev_c    = ev_c
-                                            ev_t    = ev_t ).
-            ev_found = abap_true.
-            ev_raw   = lv_stmt.
-            EXIT.
-          ENDIF.
-        ENDIF.
-      ENDLOOP.
+      scan_perform( EXPORTING it_src   = lt_comb
+                    IMPORTING ev_found = ev_found
+                              ev_u     = ev_u
+                              ev_c     = ev_c
+                              ev_t     = ev_t
+                              ev_raw   = ev_raw ).
     ENDIF.
 
     INSERT VALUE #( prog = iv_prog form = lv_form_u found = ev_found
@@ -581,6 +621,99 @@ CLASS lcl_app IMPLEMENTATION.
             WHEN 'T'. ev_t = ev_t + 1.
           ENDCASE.
       ENDCASE.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD scan_perform.
+    CLEAR: ev_found, ev_u, ev_c, ev_t, ev_raw.
+    DATA(lv_from) = COND i( WHEN iv_from > 1 THEN iv_from ELSE 1 ).
+    IF lv_from > lines( it_src ).
+      RETURN.
+    ENDIF.
+    LOOP AT it_src FROM lv_from INTO DATA(lv_line).
+      DATA(lv_idx) = sy-tabix.
+      IF word_at( it_w = words( lv_line ) iv_idx = 1 ) = 'PERFORM'.
+        DATA(lv_stmt) = read_stmt( it_src = it_src iv_start = lv_idx ).
+        IF lv_stmt CS 'IN PROGRAM'.
+          parse_perform_counts( EXPORTING iv_stmt = lv_stmt
+                                IMPORTING ev_u    = ev_u
+                                          ev_c    = ev_c
+                                          ev_t    = ev_t ).
+          ev_found = abap_true.
+          ev_raw   = lv_stmt.
+          RETURN.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD add_wu.
+    IF iv_prog IS INITIAL.
+      RETURN.
+    ENDIF.
+    READ TABLE mt_wu ASSIGNING FIELD-SYMBOL(<wu>) WITH KEY prog = iv_prog.
+    IF sy-subrc <> 0.
+      INSERT VALUE #( prog = iv_prog found = abap_true
+                      u = iv_u c = iv_c t = iv_t ) INTO TABLE mt_wu.
+    ELSEIF <wu>-u <> iv_u OR <wu>-c <> iv_c OR <wu>-t <> iv_t.
+      <wu>-ambiguous = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD build_where_used_map.
+    " ZBC_FM_SPLIT_FIND where-used (enhancement dahil tum cagri yerleri).
+    " Her cagri yerindeki include okunup dinamik PERFORM imzasi cikarilir,
+    " ana programa (ENCL_OBJEC) ve include'a (PROGRAM) gore haritalanir.
+    IF mv_wu_done = abap_true.
+      RETURN.
+    ENDIF.
+    mv_wu_done = abap_true.
+
+    DATA lt_find   TYPE STANDARD TABLE OF string.
+    DATA lt_founds TYPE STANDARD TABLE OF rsfindlst.
+    APPEND 'ZBC_FM_SPLIT_FIND' TO lt_find.
+
+    CALL FUNCTION 'RS_EU_CROSSREF'
+      EXPORTING
+        i_find_obj_cls = 'FUNC'
+        no_dialog      = 'X'
+      TABLES
+        i_findstrings  = lt_find
+        o_founds       = lt_founds
+      EXCEPTIONS
+        OTHERS         = 1.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    LOOP AT lt_founds INTO DATA(ls_f).
+      DATA(lv_incl) = CONV programm(
+        COND string( WHEN ls_f-program IS NOT INITIAL THEN ls_f-program ELSE ls_f-object ) ).
+      IF lv_incl IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      DATA(lv_from) = COND i( WHEN ls_f-object_row > 1 THEN ls_f-object_row ELSE 1 ).
+      scan_perform( EXPORTING it_src   = read_src( lv_incl )
+                              iv_from  = lv_from
+                    IMPORTING ev_found = DATA(lv_f)
+                              ev_u     = DATA(lv_u)
+                              ev_c     = DATA(lv_c)
+                              ev_t     = DATA(lv_t) ).
+      IF lv_f = abap_false.
+        scan_perform( EXPORTING it_src   = read_src( lv_incl )
+                                iv_from  = 1
+                      IMPORTING ev_found = lv_f
+                                ev_u     = lv_u
+                                ev_c     = lv_c
+                                ev_t     = lv_t ).
+      ENDIF.
+      IF lv_f = abap_false.
+        CONTINUE.
+      ENDIF.
+
+      add_wu( iv_prog = CONV programm( ls_f-encl_objec ) iv_u = lv_u iv_c = lv_c iv_t = lv_t ).
+      add_wu( iv_prog = lv_incl                          iv_u = lv_u iv_c = lv_c iv_t = lv_t ).
     ENDLOOP.
   ENDMETHOD.
 
