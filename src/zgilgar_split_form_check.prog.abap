@@ -3,31 +3,28 @@ REPORT zgilgar_split_form_check.
 "&---------------------------------------------------------------------*
 "& Report  ZGILGAR_SPLIT_FORM_CHECK
 "&---------------------------------------------------------------------*
-"& ZSPLIT cercevesi (ZWBC0001_SPLTHDR) icin: her kayitta kaynak standart
-"& FORM (SPROG/SFORM - genelde enhancement/user-exit include'i) ile bizim
-"& Z kopya FORM (DPROG/DFORM) imzalari karsilastirilir.
+"& ZSPLIT cercevesi (ZWBC0001_SPLTHDR) icin: her kayitta, kaynak
+"& exit/form/FM icindeki ZBC_FM_SPLIT_FIND'den sonra cagrilan DINAMIK
+"&   PERFORM (dform) IN PROGRAM (dprog) [TABLES..][USING..][CHANGING..]
+"& ifadesinin parametre profili (TABLES/USING/CHANGING sayisi) ile,
+"& Z split formunun (DPROG/DFORM) formal parametre profili karsilastirilir.
 "&
-"& Upgrade sonrasi standart exit/BAdI/FORM parametreleri degisince, donmus
-"& Z kopyanin TABLES/USING/CHANGING arayuzu artik eslesmez. Bu rapor
-"& eslesmeyen (veya kaynagi/kopya formu artik bulunamayan) kayitlari
-"& listeler.
+"& Dinamik PERFORM cagrisinin calisma-zamani sozlesmesi: TABLES/USING/
+"& CHANGING parametre SAYILARI form ile birebir uymak zorundadir; uymazsa
+"& CX_SY_DYN_CALL_PARAM_* dump olur. Upgrade sonrasi exit/FM degisip de
+"& Z form guncellenmediyse bu sayilar tutmaz -> rapor bunu listeler.
 "&
-"& Kaynak iki turlu olabilir:
-"&  * FORM  : SPROG/SFORM klasik subroutine. Karsilastirma POZISYONELdir
-"&           (PERFORM pozisyonel): ad yok sayilir, kind + tip karsilastirilir.
-"&  * FM    : SPROG bir SAPL* function-grup main programi ise SFORM bir
-"&           function module adidir. FM arayuzu FUPARAREF'ten okunur.
-"&           Enhancement icinde ZBC_FM_SPLIT_FIND ile bulunan formlara
-"&           PERFORM (dform) IN PROGRAM (dprog) USING ... cagrisi FM
-"&           parametrelerini AYNI ISIMLE gectiginden, Z form parametreleri
-"&           FM arayuzu ile ISIM BAZLI karsilastirilir.
+"& Kaynak PERFORM'un yeri:
+"&  * Customer-exit FM (EXIT_*): FM govdesi -> INCLUDE Zxxx -> dogrudan
+"&    ZBC_FM_SPLIT_FIND + PERFORM. READ REPORT + INCLUDE zinciri ile bulunur.
+"&  * Klasik FORM exit: FORM govdesi / include'u.
+"&  * Enhancement: (su an best-effort) READ REPORT ile gorulemez -> bu
+"&    satirlar 'PERFORM BULUNAMADI' olarak isaretlenir.
 "&
-"& DDIC yapilarinin (LIPS, LIKP...) ic alan degisiklikleri bu statik
-"& karsilastirma ile yakalanmaz - parametre eklenmesi/cikarilmasi/yeniden
-"& adlandirilmasi ve tip referansi degisimi yakalanir.
+"& sform'a gore CAPALANIR (bir function grupta birden cok exit ve farkli
+"& PERFORM imzasi olabilir).
 "&
-"& NOT: Tablo adi kuruluma gore degisebilir; gerekirse ZWBC0001_SPLTHDR
-"&      satirini kendi tablonuzla degistirin.
+"& NOT: Tablo adi kuruluma gore degisebilir; gerekirse ZWBC0001_SPLTHDR.
 "&---------------------------------------------------------------------*
 
 DATA: gv_prog TYPE programm,
@@ -47,24 +44,38 @@ CLASS lcl_app DEFINITION.
     TYPES: BEGIN OF ty_param,
              kind   TYPE string,        " TABLES / USING / CHANGING
              name   TYPE string,
-             pass   TYPE string,        " VALUE (value-by-value) ya da bos
-             typing TYPE string,        " TYPE / LIKE / STRUCTURE
-             type   TYPE string,        " tip referansi
+             typing TYPE string,
+             type   TYPE string,
            END OF ty_param,
            tt_param TYPE STANDARD TABLE OF ty_param WITH DEFAULT KEY.
-
-    TYPES: BEGIN OF ty_cache,
-             prog   TYPE programm,
-             form   TYPE string,
-             found  TYPE abap_bool,
-             kind   TYPE string,        " FORM / FM
-             params TYPE tt_param,
-           END OF ty_cache.
 
     TYPES: BEGIN OF ty_inc,
              prog TYPE programm,
              tab  TYPE STANDARD TABLE OF programm WITH DEFAULT KEY,
            END OF ty_inc.
+
+    TYPES: BEGIN OF ty_src,
+             prog TYPE programm,
+             src  TYPE string_table,
+           END OF ty_src.
+
+    TYPES: BEGIN OF ty_fcache,
+             prog   TYPE programm,
+             form   TYPE string,
+             found  TYPE abap_bool,
+             params TYPE tt_param,
+           END OF ty_fcache.
+
+    TYPES: BEGIN OF ty_pcache,
+             prog  TYPE programm,
+             form  TYPE string,
+             found TYPE abap_bool,
+             kind  TYPE string,         " FM / FORM
+             u     TYPE i,
+             c     TYPE i,
+             t     TYPE i,
+             raw   TYPE string,
+           END OF ty_pcache.
 
     TYPES: BEGIN OF ty_result,
              sprog    TYPE programm,
@@ -72,53 +83,76 @@ CLASS lcl_app DEFINITION.
              src_kind TYPE string,
              dprog    TYPE programm,
              dform    TYPE string,
-             status  TYPE string,
-             detail  TYPE string,
-             src_cnt TYPE i,
-             dst_cnt TYPE i,
-             src_sig TYPE string,
-             dst_sig TYPE string,
-             t_color TYPE lvc_t_scol,
+             status   TYPE string,
+             detail   TYPE string,
+             perf_u   TYPE i,
+             perf_c   TYPE i,
+             perf_t   TYPE i,
+             z_u      TYPE i,
+             z_c      TYPE i,
+             z_t      TYPE i,
+             perf_raw TYPE string,
+             z_sig    TYPE string,
+             t_color  TYPE lvc_t_scol,
            END OF ty_result.
 
     DATA mt_result TYPE STANDARD TABLE OF ty_result.
-    DATA mt_cache  TYPE HASHED TABLE OF ty_cache WITH UNIQUE KEY prog form.
-    DATA mt_inc    TYPE HASHED TABLE OF ty_inc   WITH UNIQUE KEY prog.
+    DATA mt_inc    TYPE HASHED TABLE OF ty_inc    WITH UNIQUE KEY prog.
+    DATA mt_src    TYPE HASHED TABLE OF ty_src    WITH UNIQUE KEY prog.
+    DATA mt_fcache TYPE HASHED TABLE OF ty_fcache WITH UNIQUE KEY prog form.
+    DATA mt_pcache TYPE HASHED TABLE OF ty_pcache WITH UNIQUE KEY prog form.
 
     METHODS get_includes
       IMPORTING iv_prog       TYPE programm
       RETURNING VALUE(rt_inc) TYPE ty_inc-tab.
-    METHODS get_signature
-      IMPORTING iv_prog  TYPE programm
-                iv_form  TYPE string
-      EXPORTING et_param TYPE tt_param
-                ev_found TYPE abap_bool
-                ev_kind  TYPE string.
-    METHODS compare_fm
-      IMPORTING it_src    TYPE tt_param
-                it_dst    TYPE tt_param
-      EXPORTING ev_status TYPE string
-                ev_detail TYPE string.
+    METHODS read_src
+      IMPORTING iv_prog    TYPE programm
+      RETURNING VALUE(rt)  TYPE string_table.
     METHODS strip_comment
       IMPORTING iv_line   TYPE string
       RETURNING VALUE(rv) TYPE string.
-    METHODS read_header
+    METHODS words
+      IMPORTING iv_line   TYPE string
+      RETURNING VALUE(rt) TYPE string_table.
+    METHODS word_at
+      IMPORTING it_w      TYPE string_table
+                iv_idx    TYPE i
+      RETURNING VALUE(rv) TYPE string.
+    METHODS read_stmt
       IMPORTING it_src    TYPE string_table
                 iv_start  TYPE i
       RETURNING VALUE(rv) TYPE string.
     METHODS parse_header
       IMPORTING iv_header       TYPE string
       RETURNING VALUE(rt_param) TYPE tt_param.
-    METHODS build_norm
-      IMPORTING it_param  TYPE tt_param
-      RETURNING VALUE(rv) TYPE string.
     METHODS build_human
       IMPORTING it_param  TYPE tt_param
       RETURNING VALUE(rv) TYPE string.
-    METHODS diff_detail
-      IMPORTING it_src    TYPE tt_param
-                it_dst    TYPE tt_param
-      RETURNING VALUE(rv) TYPE string.
+    METHODS get_form_params
+      IMPORTING iv_prog  TYPE programm
+                iv_form  TYPE string
+      EXPORTING et_param TYPE tt_param
+                ev_found TYPE abap_bool.
+    METHODS collect_unit_source
+      IMPORTING iv_prog  TYPE programm
+                iv_form  TYPE string
+      EXPORTING et_src   TYPE string_table
+                ev_found TYPE abap_bool
+                ev_kind  TYPE string.
+    METHODS find_perform_sig
+      IMPORTING iv_prog  TYPE programm
+                iv_form  TYPE string
+      EXPORTING ev_found TYPE abap_bool
+                ev_kind  TYPE string
+                ev_u     TYPE i
+                ev_c     TYPE i
+                ev_t     TYPE i
+                ev_raw   TYPE string.
+    METHODS parse_perform_counts
+      IMPORTING iv_stmt TYPE string
+      EXPORTING ev_u    TYPE i
+                ev_c    TYPE i
+                ev_t    TYPE i.
     METHODS display.
 ENDCLASS.
 
@@ -139,55 +173,57 @@ CLASS lcl_app IMPLEMENTATION.
     ENDIF.
 
     LOOP AT lt_hdr INTO DATA(ls_hdr).
-      get_signature( EXPORTING iv_prog  = CONV #( ls_hdr-sprog )
-                               iv_form  = CONV #( ls_hdr-sform )
-                     IMPORTING et_param = DATA(lt_src)
-                               ev_found = DATA(lv_src_found)
-                               ev_kind  = DATA(lv_src_kind) ).
-      get_signature( EXPORTING iv_prog  = CONV #( ls_hdr-dprog )
-                               iv_form  = CONV #( ls_hdr-dform )
-                     IMPORTING et_param = DATA(lt_dst)
-                               ev_found = DATA(lv_dst_found) ).
+      " beklenen: kaynak exit/form icindeki dinamik PERFORM imzasi
+      find_perform_sig( EXPORTING iv_prog  = CONV #( ls_hdr-sprog )
+                                  iv_form  = CONV #( ls_hdr-sform )
+                        IMPORTING ev_found = DATA(lv_pfound)
+                                  ev_kind  = DATA(lv_kind)
+                                  ev_u     = DATA(lv_pu)
+                                  ev_c     = DATA(lv_pc)
+                                  ev_t     = DATA(lv_pt)
+                                  ev_raw   = DATA(lv_raw) ).
+
+      " gerceklesen: Z form formal parametreleri
+      get_form_params( EXPORTING iv_prog  = CONV #( ls_hdr-dprog )
+                                 iv_form  = CONV #( ls_hdr-dform )
+                       IMPORTING et_param = DATA(lt_z)
+                                 ev_found = DATA(lv_zfound) ).
+
+      DATA(lv_zu) = REDUCE i( INIT x = 0 FOR p IN lt_z WHERE ( kind = 'USING' )    NEXT x = x + 1 ).
+      DATA(lv_zc) = REDUCE i( INIT x = 0 FOR p IN lt_z WHERE ( kind = 'CHANGING' ) NEXT x = x + 1 ).
+      DATA(lv_zt) = REDUCE i( INIT x = 0 FOR p IN lt_z WHERE ( kind = 'TABLES' )   NEXT x = x + 1 ).
 
       DATA(ls_res) = VALUE ty_result(
         sprog    = ls_hdr-sprog
         sform    = ls_hdr-sform
-        src_kind = lv_src_kind
+        src_kind = lv_kind
         dprog    = ls_hdr-dprog
         dform    = ls_hdr-dform
-        src_cnt  = lines( lt_src )
-        dst_cnt  = lines( lt_dst )
-        src_sig  = build_human( lt_src )
-        dst_sig  = build_human( lt_dst ) ).
+        perf_u   = lv_pu
+        perf_c   = lv_pc
+        perf_t   = lv_pt
+        z_u      = lv_zu
+        z_c      = lv_zc
+        z_t      = lv_zt
+        perf_raw = lv_raw
+        z_sig    = build_human( lt_z ) ).
 
       DATA(lv_ok) = abap_false.
-      IF lv_src_found = abap_false AND lv_dst_found = abap_false.
-        ls_res-status = 'HER IKI TARAF DA YOK'.
-        ls_res-detail = 'Kaynak FORM/FM ve zsplit form bulunamadi'.
-      ELSEIF lv_src_found = abap_false.
-        ls_res-status = 'KAYNAK FORM/FM YOK'.
-        ls_res-detail = 'Standart form/FM bulunamadi (upgrade ile silinmis/yeniden adlandirilmis olabilir)'.
-      ELSEIF lv_dst_found = abap_false.
+      IF lv_zfound = abap_false.
         ls_res-status = 'ZSPLIT FORM YOK'.
         ls_res-detail = 'Z kopya form bulunamadi'.
-      ELSEIF lv_src_kind = 'FM'.
-        " kaynak FM -> Z form parametreleri isim bazli karsilastirilir
-        compare_fm( EXPORTING it_src    = lt_src
-                              it_dst    = lt_dst
-                    IMPORTING ev_status = ls_res-status
-                              ev_detail = ls_res-detail ).
-        IF ls_res-status = 'ESLESIYOR'.
-          lv_ok = abap_true.
-        ENDIF.
-      ELSEIF build_norm( lt_src ) = build_norm( lt_dst ).
+      ELSEIF lv_pfound = abap_false.
+        ls_res-status = 'PERFORM BULUNAMADI'.
+        ls_res-detail = 'Kaynaktaki dinamik PERFORM okunamadi (enhancement icinde olabilir)'.
+      ELSEIF lv_pu = lv_zu AND lv_pc = lv_zc AND lv_pt = lv_zt.
         ls_res-status = 'ESLESIYOR'.
         lv_ok = abap_true.
       ELSE.
         ls_res-status = 'PARAMETRE UYUSMUYOR'.
-        ls_res-detail = diff_detail( it_src = lt_src it_dst = lt_dst ).
+        ls_res-detail = |PERFORM[U={ lv_pu } C={ lv_pc } T={ lv_pt }]| &&
+                        | <> Zform[U={ lv_zu } C={ lv_zc } T={ lv_zt }]|.
       ENDIF.
 
-      " satir rengi: yesil = eslesti, kirmizi = sorun
       ls_res-t_color = VALUE #( ( fname = space
                                   color = VALUE #( col = COND i( WHEN lv_ok = abap_true THEN 5 ELSE 6 ) ) ) ).
 
@@ -208,7 +244,6 @@ CLASS lcl_app IMPLEMENTATION.
     ENDIF.
 
     APPEND iv_prog TO rt_inc.
-
     DATA lt_raw TYPE STANDARD TABLE OF programm.
     CALL FUNCTION 'RS_GET_ALL_INCLUDES'
       EXPORTING
@@ -222,93 +257,19 @@ CLASS lcl_app IMPLEMENTATION.
     IF sy-subrc = 0.
       APPEND LINES OF lt_raw TO rt_inc.
     ENDIF.
-
     SORT rt_inc.
     DELETE ADJACENT DUPLICATES FROM rt_inc.
     INSERT VALUE #( prog = iv_prog tab = rt_inc ) INTO TABLE mt_inc.
   ENDMETHOD.
 
-  METHOD get_signature.
-    DATA(lv_form_u) = to_upper( condense( iv_form ) ).
-
-    READ TABLE mt_cache INTO DATA(ls_cache)
-         WITH KEY prog = iv_prog form = lv_form_u.
+  METHOD read_src.
+    READ TABLE mt_src INTO DATA(ls) WITH KEY prog = iv_prog.
     IF sy-subrc = 0.
-      et_param = ls_cache-params.
-      ev_found = ls_cache-found.
-      ev_kind  = ls_cache-kind.
+      rt = ls-src.
       RETURN.
     ENDIF.
-
-    CLEAR: et_param, ev_found, ev_kind.
-    DATA(lt_inc) = get_includes( iv_prog ).
-
-    LOOP AT lt_inc INTO DATA(lv_inc).
-      DATA lt_src TYPE string_table.
-      READ REPORT lv_inc INTO lt_src.
-      IF sy-subrc <> 0.
-        CONTINUE.
-      ENDIF.
-
-      LOOP AT lt_src INTO DATA(lv_line).
-        DATA(lv_idx)  = sy-tabix.
-        DATA(lv_code) = to_upper( condense( strip_comment( lv_line ) ) ).
-
-        DATA lv_fname TYPE string.
-        CLEAR lv_fname.
-        FIND REGEX '^FORM\s+([A-Z0-9_]+)' IN lv_code SUBMATCHES lv_fname.
-        IF sy-subrc = 0 AND lv_fname = lv_form_u.
-          DATA(lv_header) = read_header( it_src = lt_src iv_start = lv_idx ).
-          et_param = parse_header( lv_header ).
-          ev_found = abap_true.
-          ev_kind  = 'FORM'.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
-
-      IF ev_found = abap_true.
-        EXIT.
-      ENDIF.
-    ENDLOOP.
-
-    " FORM bulunamadi -> SFORM bir function module olabilir.
-    " (SAPL* programlari function grup main programidir; SFORM = FM adi.)
-    " FM arayuzu FUPARAREF'ten okunur; enhancement icindeki
-    " PERFORM (dform) IN PROGRAM (dprog) USING ... cagrisi FM parametrelerini
-    " ayni isimle gectiginden Z form ile isim bazli karsilastirilir.
-    IF ev_found = abap_false.
-      DATA lv_func TYPE rs38l_fnam.
-      lv_func = lv_form_u.
-      SELECT parameter, paramtype, structure
-        FROM fupararef
-        INTO TABLE @DATA(lt_fp)
-        WHERE funcname = @lv_func
-          AND r3state  = 'A'.
-      IF sy-subrc = 0.
-        LOOP AT lt_fp INTO DATA(ls_fp).
-          DATA(lv_k) = SWITCH string( ls_fp-paramtype
-                         WHEN 'I' THEN 'IMPORTING'
-                         WHEN 'E' THEN 'EXPORTING'
-                         WHEN 'C' THEN 'CHANGING'
-                         WHEN 'T' THEN 'TABLES'
-                         ELSE space ).
-          IF lv_k IS INITIAL.
-            CONTINUE.                          " exception vs.
-          ENDIF.
-          APPEND VALUE #( kind = lv_k
-                          name = to_upper( CONV string( ls_fp-parameter ) )
-                          type = to_upper( CONV string( ls_fp-structure ) ) ) TO et_param.
-        ENDLOOP.
-        ev_found = abap_true.
-        ev_kind  = 'FM'.
-      ENDIF.
-    ENDIF.
-
-    INSERT VALUE #( prog   = iv_prog
-                    form   = lv_form_u
-                    found  = ev_found
-                    kind   = ev_kind
-                    params = et_param ) INTO TABLE mt_cache.
+    READ REPORT iv_prog INTO rt.
+    INSERT VALUE #( prog = iv_prog src = rt ) INTO TABLE mt_src.
   ENDMETHOD.
 
   METHOD strip_comment.
@@ -317,12 +278,22 @@ CLASS lcl_app IMPLEMENTATION.
       rv = ''.
       RETURN.
     ENDIF.
-    " satir ici yorumu ( " ) at
     SPLIT iv_line AT '"' INTO rv DATA(lv_rest).
   ENDMETHOD.
 
-  METHOD read_header.
-    " FORM ifadesi cok satira yayilabilir; ilk noktaya kadar topla.
+  METHOD words.
+    DATA(lv) = to_upper( condense( strip_comment( iv_line ) ) ).
+    SPLIT lv AT ` ` INTO TABLE rt.
+    DELETE rt WHERE table_line IS INITIAL.
+  ENDMETHOD.
+
+  METHOD word_at.
+    rv = VALUE #( it_w[ iv_idx ] OPTIONAL ).
+    REPLACE ALL OCCURRENCES OF '.' IN rv WITH ''.
+    REPLACE ALL OCCURRENCES OF ',' IN rv WITH ''.
+  ENDMETHOD.
+
+  METHOD read_stmt.
     DATA lv TYPE string.
     LOOP AT it_src FROM iv_start INTO DATA(lv_line).
       DATA(lv_code) = strip_comment( lv_line ).
@@ -335,6 +306,37 @@ CLASS lcl_app IMPLEMENTATION.
       ENDIF.
     ENDLOOP.
     rv = condense( to_upper( lv ) ).
+  ENDMETHOD.
+
+  METHOD get_form_params.
+    DATA(lv_form_u) = to_upper( condense( iv_form ) ).
+    READ TABLE mt_fcache INTO DATA(ls_c) WITH KEY prog = iv_prog form = lv_form_u.
+    IF sy-subrc = 0.
+      et_param = ls_c-params.
+      ev_found = ls_c-found.
+      RETURN.
+    ENDIF.
+
+    CLEAR: et_param, ev_found.
+    LOOP AT get_includes( iv_prog ) INTO DATA(lv_inc).
+      DATA(lt_src) = read_src( lv_inc ).
+      LOOP AT lt_src INTO DATA(lv_line).
+        DATA(lv_idx) = sy-tabix.
+        DATA(lt_w)   = words( lv_line ).
+        IF word_at( it_w = lt_w iv_idx = 1 ) = 'FORM'
+           AND word_at( it_w = lt_w iv_idx = 2 ) = lv_form_u.
+          et_param = parse_header( read_stmt( it_src = lt_src iv_start = lv_idx ) ).
+          ev_found = abap_true.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF ev_found = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    INSERT VALUE #( prog = iv_prog form = lv_form_u found = ev_found params = et_param )
+           INTO TABLE mt_fcache.
   ENDMETHOD.
 
   METHOD parse_header.
@@ -366,8 +368,6 @@ CLASS lcl_app IMPLEMENTATION.
         IF lv_w = 'TYPE' AND lv_i + 1 <= lv_n AND lt_w[ lv_i + 1 ] = 'REF'.
           IF lv_i + 3 <= lv_n.
             lv_type = |REF TO { lt_w[ lv_i + 3 ] }|.
-          ELSE.
-            lv_type = 'REF TO'.
           ENDIF.
           lv_i = lv_i + 4.
         ELSE.
@@ -376,7 +376,7 @@ CLASS lcl_app IMPLEMENTATION.
           ENDIF.
           lv_i = lv_i + 2.
         ENDIF.
-        IF rt_param IS NOT INITIAL.
+        IF rt_param IS NOT INITIAL AND lv_type IS NOT INITIAL.
           DATA(lv_last) = lines( rt_param ).
           rt_param[ lv_last ]-typing = lv_typing.
           rt_param[ lv_last ]-type   = lv_type.
@@ -389,84 +389,157 @@ CLASS lcl_app IMPLEMENTATION.
         CONTINUE.
       ENDIF.
 
-      " parametre adi (gerekirse VALUE(...) cozulur)
       DATA(lv_name) = lv_w.
-      DATA(lv_pass) = ``.
       IF lv_name CP 'VALUE(*'.
-        lv_pass = 'VALUE'.
         REPLACE ALL OCCURRENCES OF 'VALUE(' IN lv_name WITH ``.
         REPLACE ALL OCCURRENCES OF ')'      IN lv_name WITH ``.
       ENDIF.
       IF lv_name IS NOT INITIAL AND lv_kind IS NOT INITIAL.
-        APPEND VALUE #( kind = lv_kind name = lv_name pass = lv_pass ) TO rt_param.
+        APPEND VALUE #( kind = lv_kind name = lv_name ) TO rt_param.
       ENDIF.
       lv_i = lv_i + 1.
     ENDWHILE.
   ENDMETHOD.
 
-  METHOD build_norm.
-    " pozisyonel imza: ad yok sayilir, kind + tip referansi
-    LOOP AT it_param INTO DATA(ls).
-      rv = |{ rv }{ ls-kind }[{ ls-type }];|.
-    ENDLOOP.
-  ENDMETHOD.
-
   METHOD build_human.
     LOOP AT it_param INTO DATA(ls).
       DATA(lv_t) = COND string( WHEN ls-type IS NOT INITIAL THEN | { ls-typing } { ls-type }| ELSE `` ).
-      DATA(lv_v) = COND string( WHEN ls-pass = 'VALUE' THEN |VALUE({ ls-name })| ELSE ls-name ).
-      rv = |{ rv }{ ls-kind } { lv_v }{ lv_t } / |.
+      rv = |{ rv }{ ls-kind } { ls-name }{ lv_t } / |.
     ENDLOOP.
   ENDMETHOD.
 
-  METHOD diff_detail.
-    IF lines( it_src ) <> lines( it_dst ).
-      rv = |Parametre sayisi farkli: kaynak={ lines( it_src ) } / zsplit={ lines( it_dst ) }|.
+  METHOD collect_unit_source.
+    CLEAR: et_src, ev_found, ev_kind.
+    DATA(lv_form_u) = to_upper( condense( iv_form ) ).
+    DATA lt_worklist TYPE string_table.
+    DATA lt_visited  TYPE string_table.
+
+    " 1) FUNCTION/FORM <iv_form> govdesini bul
+    LOOP AT get_includes( iv_prog ) INTO DATA(lv_inc).
+      DATA(lt_src)    = read_src( lv_inc ).
+      DATA(lv_in_unit) = abap_false.
+      LOOP AT lt_src INTO DATA(lv_line).
+        DATA(lt_w) = words( lv_line ).
+        DATA(lv_w1) = word_at( it_w = lt_w iv_idx = 1 ).
+        DATA(lv_w2) = word_at( it_w = lt_w iv_idx = 2 ).
+
+        IF lv_in_unit = abap_false.
+          IF ( lv_w1 = 'FUNCTION' OR lv_w1 = 'FORM' ) AND lv_w2 = lv_form_u.
+            lv_in_unit = abap_true.
+            ev_found   = abap_true.
+            ev_kind    = COND #( WHEN lv_w1 = 'FUNCTION' THEN 'FM' ELSE 'FORM' ).
+            APPEND lv_line TO et_src.
+          ENDIF.
+        ELSE.
+          IF lv_w1 = 'ENDFUNCTION' OR lv_w1 = 'ENDFORM'.
+            EXIT.
+          ENDIF.
+          APPEND lv_line TO et_src.
+          IF lv_w1 = 'INCLUDE' AND lv_w2 IS NOT INITIAL AND lv_w2 <> 'STRUCTURE'.
+            APPEND lv_w2 TO lt_worklist.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+      IF ev_found = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    IF ev_found = abap_false.
       RETURN.
     ENDIF.
-    LOOP AT it_src INTO DATA(ls_s).
-      DATA(lv_i) = sy-tabix.
-      DATA(ls_d) = VALUE #( it_dst[ lv_i ] OPTIONAL ).
-      IF ls_s-kind <> ls_d-kind OR ls_s-type <> ls_d-type.
-        rv = |Poz { lv_i }: kaynak [{ ls_s-kind } { ls_s-type }] <> zsplit [{ ls_d-kind } { ls_d-type }]|.
-        RETURN.
+
+    " 2) govdedeki INCLUDE'lari (ic ice) recursive ekle
+    WHILE lt_worklist IS NOT INITIAL.
+      DATA(lv_cur) = lt_worklist[ 1 ].
+      DELETE lt_worklist INDEX 1.
+      IF line_exists( lt_visited[ table_line = lv_cur ] ).
+        CONTINUE.
       ENDIF.
-    ENDLOOP.
-    rv = 'Tip/siralama farki'.
+      APPEND lv_cur TO lt_visited.
+
+      DATA(lt_isrc) = read_src( CONV programm( lv_cur ) ).
+      LOOP AT lt_isrc INTO DATA(lv_iline).
+        APPEND lv_iline TO et_src.
+        DATA(lt_iw) = words( lv_iline ).
+        IF word_at( it_w = lt_iw iv_idx = 1 ) = 'INCLUDE'.
+          DATA(lv_iw2) = word_at( it_w = lt_iw iv_idx = 2 ).
+          IF lv_iw2 IS NOT INITIAL AND lv_iw2 <> 'STRUCTURE'.
+            APPEND lv_iw2 TO lt_worklist.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDWHILE.
   ENDMETHOD.
 
-  METHOD compare_fm.
-    " Z form parametrelerini (it_dst) kaynak FM arayuzu (it_src) ile isim
-    " bazli karsilastir. Kind (USING/IMPORTING...) yok sayilir; cunku
-    " enhancement FM importing/exporting parametrelerini USING ile geciyor.
-    " Z form FM'in alt kumesini kullandigindan ters yon kontrol edilmez.
-    DATA lt_issue   TYPE string_table.
-    DATA lv_missing TYPE abap_bool.
-
-    LOOP AT it_dst INTO DATA(ls_d).
-      READ TABLE it_src INTO DATA(ls_s) WITH KEY name = ls_d-name.
-      IF sy-subrc <> 0.
-        APPEND |'{ ls_d-name }' kaynak FM arayuzunde yok| TO lt_issue.
-        lv_missing = abap_true.
-      ELSEIF ls_d-type IS NOT INITIAL AND ls_s-type IS NOT INITIAL
-         AND ls_d-type <> ls_s-type.
-        APPEND |'{ ls_d-name }' tip farkli: FM[{ ls_s-type }] <> Z[{ ls_d-type }]| TO lt_issue.
-      ENDIF.
-    ENDLOOP.
-
-    IF lt_issue IS INITIAL.
-      ev_status = 'ESLESIYOR'.
-    ELSEIF lv_missing = abap_true.
-      ev_status = 'PARAMETRE UYUSMUYOR'.
-    ELSE.
-      ev_status = 'TIP FARKLI'.
+  METHOD find_perform_sig.
+    DATA(lv_form_u) = to_upper( condense( iv_form ) ).
+    READ TABLE mt_pcache INTO DATA(ls_c) WITH KEY prog = iv_prog form = lv_form_u.
+    IF sy-subrc = 0.
+      ev_found = ls_c-found. ev_kind = ls_c-kind.
+      ev_u = ls_c-u. ev_c = ls_c-c. ev_t = ls_c-t. ev_raw = ls_c-raw.
+      RETURN.
     ENDIF.
-    ev_detail = concat_lines_of( table = lt_issue sep = `; ` ).
+
+    CLEAR: ev_found, ev_kind, ev_u, ev_c, ev_t, ev_raw.
+
+    collect_unit_source( EXPORTING iv_prog  = iv_prog
+                                   iv_form  = iv_form
+                         IMPORTING et_src   = DATA(lt_comb)
+                                   ev_found = DATA(lv_unit)
+                                   ev_kind  = ev_kind ).
+
+    IF lv_unit = abap_true.
+      LOOP AT lt_comb INTO DATA(lv_line).
+        DATA(lv_idx) = sy-tabix.
+        DATA(lt_w)   = words( lv_line ).
+        IF word_at( it_w = lt_w iv_idx = 1 ) = 'PERFORM'.
+          DATA(lv_stmt) = read_stmt( it_src = lt_comb iv_start = lv_idx ).
+          IF lv_stmt CS 'IN PROGRAM'.
+            parse_perform_counts( EXPORTING iv_stmt = lv_stmt
+                                  IMPORTING ev_u    = ev_u
+                                            ev_c    = ev_c
+                                            ev_t    = ev_t ).
+            ev_found = abap_true.
+            ev_raw   = lv_stmt.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+    ENDIF.
+
+    INSERT VALUE #( prog = iv_prog form = lv_form_u found = ev_found
+                    kind = ev_kind u = ev_u c = ev_c t = ev_t raw = ev_raw )
+           INTO TABLE mt_pcache.
+  ENDMETHOD.
+
+  METHOD parse_perform_counts.
+    CLEAR: ev_u, ev_c, ev_t.
+    SPLIT iv_stmt AT ` ` INTO TABLE DATA(lt_w).
+    DELETE lt_w WHERE table_line IS INITIAL.
+
+    DATA lv_sec TYPE c LENGTH 1.
+    LOOP AT lt_w INTO DATA(lv_w).
+      CASE lv_w.
+        WHEN 'TABLES'.   lv_sec = 'T'.
+        WHEN 'USING'.    lv_sec = 'U'.
+        WHEN 'CHANGING'. lv_sec = 'C'.
+        WHEN 'IF'.       EXIT.            " IF FOUND
+        WHEN '(' OR ')'.
+          " atla
+        WHEN OTHERS.
+          CASE lv_sec.
+            WHEN 'U'. ev_u = ev_u + 1.
+            WHEN 'C'. ev_c = ev_c + 1.
+            WHEN 'T'. ev_t = ev_t + 1.
+          ENDCASE.
+      ENDCASE.
+    ENDLOOP.
   ENDMETHOD.
 
   METHOD display.
     IF mt_result IS INITIAL.
-      MESSAGE 'Uyusmayan form bulunamadi (tum imzalar eslesiyor).' TYPE 'I'.
+      MESSAGE 'Uyusmayan kayit bulunamadi (hepsi eslesiyor).' TYPE 'I'.
       RETURN.
     ENDIF.
 
@@ -476,7 +549,6 @@ CLASS lcl_app IMPLEMENTATION.
           CHANGING  t_table      = mt_result ).
 
         lo_alv->get_functions( )->set_all( abap_true ).
-
         DATA(lo_cols) = lo_alv->get_columns( ).
         lo_cols->set_optimize( abap_true ).
         lo_cols->set_color_column( 'T_COLOR' ).
@@ -484,19 +556,23 @@ CLASS lcl_app IMPLEMENTATION.
         lo_cols->get_column( 'SPROG'    )->set_short_text( 'Src Prog' ).
         lo_cols->get_column( 'SFORM'    )->set_short_text( 'Src Form' ).
         lo_cols->get_column( 'SRC_KIND' )->set_short_text( 'Src Kind' ).
-        lo_cols->get_column( 'DPROG'   )->set_short_text( 'Z Prog' ).
-        lo_cols->get_column( 'DFORM'   )->set_short_text( 'Z Form' ).
-        lo_cols->get_column( 'STATUS'  )->set_short_text( 'Status' ).
-        lo_cols->get_column( 'DETAIL'  )->set_short_text( 'Detail' ).
-        lo_cols->get_column( 'SRC_CNT' )->set_short_text( 'Src #' ).
-        lo_cols->get_column( 'DST_CNT' )->set_short_text( 'Z #' ).
-        lo_cols->get_column( 'SRC_SIG' )->set_short_text( 'Src Sig' ).
-        lo_cols->get_column( 'DST_SIG' )->set_short_text( 'Z Sig' ).
-        lo_cols->get_column( 'SRC_SIG' )->set_long_text( 'Source signature' ).
-        lo_cols->get_column( 'DST_SIG' )->set_long_text( 'Z-copy signature' ).
+        lo_cols->get_column( 'DPROG'    )->set_short_text( 'Z Prog' ).
+        lo_cols->get_column( 'DFORM'    )->set_short_text( 'Z Form' ).
+        lo_cols->get_column( 'STATUS'   )->set_short_text( 'Status' ).
+        lo_cols->get_column( 'DETAIL'   )->set_short_text( 'Detail' ).
+        lo_cols->get_column( 'PERF_U'   )->set_short_text( 'Perf U' ).
+        lo_cols->get_column( 'PERF_C'   )->set_short_text( 'Perf C' ).
+        lo_cols->get_column( 'PERF_T'   )->set_short_text( 'Perf T' ).
+        lo_cols->get_column( 'Z_U'      )->set_short_text( 'Z U' ).
+        lo_cols->get_column( 'Z_C'      )->set_short_text( 'Z C' ).
+        lo_cols->get_column( 'Z_T'      )->set_short_text( 'Z T' ).
+        lo_cols->get_column( 'PERF_RAW' )->set_short_text( 'PERFORM' ).
+        lo_cols->get_column( 'PERF_RAW' )->set_long_text( 'PERFORM statement' ).
+        lo_cols->get_column( 'Z_SIG'    )->set_short_text( 'Z Sig' ).
+        lo_cols->get_column( 'Z_SIG'    )->set_long_text( 'Z-form signature' ).
 
         lo_alv->get_display_settings( )->set_list_header(
-          |ZSPLIT FORM parametre kontrolu - { lines( mt_result ) } bulgu| ).
+          |ZSPLIT dinamik PERFORM parametre kontrolu - { lines( mt_result ) } bulgu| ).
 
         lo_alv->display( ).
 
