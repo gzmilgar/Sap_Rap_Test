@@ -85,17 +85,7 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
   PROTECTED SECTION.
   PRIVATE SECTION.
 
-    "! Returns (creating if needed) the parent operation row for the given key.
-    METHODS get_operation_ref
-      IMPORTING
-        !iv_order_internal_id     TYPE ty_create_line-%key-orderinternalid
-        !iv_operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid
-      CHANGING
-        !ct_create                TYPE tt_create
-      RETURNING
-        VALUE(rr_operation)       TYPE REF TO data .
-
-    "! Runs MODIFY ENTITIES (+ optional COMMIT) and collects all messages.
+    "! Runs MODIFY ENTITIES (+ optional COMMIT) and collects the messages.
     METHODS save_components
       IMPORTING
         !it_create  TYPE tt_create
@@ -123,11 +113,15 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
 
     LOOP AT it_component ASSIGNING FIELD-SYMBOL(<comp>).
 
-      DATA(lr_op) = get_operation_ref(
-                      EXPORTING iv_order_internal_id     = <comp>-order_internal_id
-                                iv_operation_internal_id = <comp>-operation_internal_id
-                      CHANGING  ct_create                = lt_create ).
-      ASSIGN lr_op->* TO FIELD-SYMBOL(<operation>).
+      " Find (or create) the parent operation row, grouping by its key.
+      ASSIGN lt_create[ %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id
+                      ] TO FIELD-SYMBOL(<operation>).
+      IF sy-subrc <> 0.
+        INSERT VALUE #( %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id )
+               INTO TABLE lt_create ASSIGNING <operation>.
+      ENDIF.
 
       lv_cid = lv_cid + 1.
 
@@ -137,12 +131,12 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
       ls_target-%cid = |CID_{ lv_cid }|.
 
       IF <comp>-material IS NOT INITIAL.
-        ls_target-%data-material      = <comp>-material.
-        ls_target-%control-material   = if_abap_behv=>mk-on.
+        ls_target-%data-material    = <comp>-material.
+        ls_target-%control-material = if_abap_behv=>mk-on.
       ENDIF.
       IF <comp>-plant IS NOT INITIAL.
-        ls_target-%data-plant         = <comp>-plant.
-        ls_target-%control-plant      = if_abap_behv=>mk-on.
+        ls_target-%data-plant    = <comp>-plant.
+        ls_target-%control-plant = if_abap_behv=>mk-on.
       ENDIF.
       IF <comp>-bom_item_category IS NOT INITIAL.
         ls_target-%data-billofmaterialitemcategory    = <comp>-bom_item_category.
@@ -153,8 +147,8 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
         ls_target-%control-requiredquantity = if_abap_behv=>mk-on.
       ENDIF.
       IF <comp>-base_unit IS NOT INITIAL.
-        ls_target-%data-baseunit      = <comp>-base_unit.
-        ls_target-%control-baseunit   = if_abap_behv=>mk-on.
+        ls_target-%data-baseunit    = <comp>-base_unit.
+        ls_target-%control-baseunit = if_abap_behv=>mk-on.
       ENDIF.
 
       INSERT ls_target INTO TABLE <operation>-%target.
@@ -182,11 +176,14 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
 
     LOOP AT it_component ASSIGNING FIELD-SYMBOL(<comp>).
 
-      DATA(lr_op) = get_operation_ref(
-                      EXPORTING iv_order_internal_id     = <comp>-order_internal_id
-                                iv_operation_internal_id = <comp>-operation_internal_id
-                      CHANGING  ct_create                = lt_create ).
-      ASSIGN lr_op->* TO FIELD-SYMBOL(<operation>).
+      ASSIGN lt_create[ %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id
+                      ] TO FIELD-SYMBOL(<operation>).
+      IF sy-subrc <> 0.
+        INSERT VALUE #( %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id )
+               INTO TABLE lt_create ASSIGNING <operation>.
+      ENDIF.
 
       lv_cid = lv_cid + 1.
 
@@ -222,53 +219,36 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
   ENDMETHOD.
 
 
-  METHOD get_operation_ref.
-
-    ASSIGN ct_create[ KEY entity COMPONENTS
-                        %key-orderinternalid          = iv_order_internal_id
-                        %key-orderoperationinternalid = iv_operation_internal_id
-                    ] TO FIELD-SYMBOL(<operation>).
-    IF sy-subrc <> 0.
-      INSERT VALUE #( %key-orderinternalid          = iv_order_internal_id
-                      %key-orderoperationinternalid = iv_operation_internal_id )
-             INTO TABLE ct_create ASSIGNING <operation>.
-    ENDIF.
-
-    GET REFERENCE OF <operation> INTO rr_operation.
-
-  ENDMETHOD.
-
-
   METHOD save_components.
 
     CLEAR: et_message, ev_success.
 
-    " No FIELDS clause: the BO honours %control, so each row only sets the
-    " fields that were flagged on.
+    " FROM (instead of FIELDS ( ... )) makes the BO honour %control, so each row
+    " only sets the fields that were flagged on.
     MODIFY ENTITIES OF i_productionordertp
       ENTITY productionorderoperation
       CREATE BY \_operationcomponent
-      WITH it_create
+      FROM it_create
       FAILED   DATA(failed)
       REPORTED DATA(reported)
       MAPPED   DATA(mapped).
 
-    " Messages from the interaction phase (EARLY reported).
-    LOOP AT reported-productionorderoperation ASSIGNING FIELD-SYMBOL(<op>).
-      IF <op>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <op>-orderinternalid
-                        operation_internal_id = <op>-orderoperationinternalid
-                        severity              = <op>-%msg->m_severity
-                        text                  = <op>-%msg->if_message~get_text( ) )
-               INTO TABLE et_message.
-      ENDIF.
-    ENDLOOP.
     LOOP AT reported-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp>).
       IF <comp>-%msg IS BOUND.
         INSERT VALUE #( order_internal_id     = <comp>-orderinternalid
                         operation_internal_id = <comp>-orderoperationinternalid
                         severity              = <comp>-%msg->m_severity
                         text                  = <comp>-%msg->if_message~get_text( ) )
+               INTO TABLE et_message.
+      ENDIF.
+    ENDLOOP.
+
+    LOOP AT reported-productionorderoperation ASSIGNING FIELD-SYMBOL(<op>).
+      IF <op>-%msg IS BOUND.
+        INSERT VALUE #( order_internal_id     = <op>-orderinternalid
+                        operation_internal_id = <op>-orderoperationinternalid
+                        severity              = <op>-%msg->m_severity
+                        text                  = <op>-%msg->if_message~get_text( ) )
                INTO TABLE et_message.
       ENDIF.
     ENDLOOP.
@@ -283,30 +263,7 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
       RETURN.
     ENDIF.
 
-    COMMIT ENTITIES RESPONSES
-      FAILED   DATA(failed_commit)
-      REPORTED DATA(reported_commit).
-
-    " Messages from the save phase (LATE reported).
-    LOOP AT reported_commit-productionorderoperation ASSIGNING FIELD-SYMBOL(<op_c>).
-      IF <op_c>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <op_c>-orderinternalid
-                        operation_internal_id = <op_c>-orderoperationinternalid
-                        severity              = <op_c>-%msg->m_severity
-                        text                  = <op_c>-%msg->if_message~get_text( ) )
-               INTO TABLE et_message.
-      ENDIF.
-    ENDLOOP.
-    LOOP AT reported_commit-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp_c>).
-      IF <comp_c>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <comp_c>-orderinternalid
-                        operation_internal_id = <comp_c>-orderoperationinternalid
-                        severity              = <comp_c>-%msg->m_severity
-                        text                  = <comp_c>-%msg->if_message~get_text( ) )
-               INTO TABLE et_message.
-      ENDIF.
-    ENDLOOP.
-
+    COMMIT ENTITIES RESPONSES FAILED DATA(failed_commit).
     ev_success = xsdbool( failed_commit IS INITIAL ).
 
   ENDMETHOD.
