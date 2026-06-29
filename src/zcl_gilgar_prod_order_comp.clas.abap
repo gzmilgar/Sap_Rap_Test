@@ -51,6 +51,17 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
            END OF ty_component_dyn,
            tt_component_dyn TYPE STANDARD TABLE OF ty_component_dyn WITH EMPTY KEY .
 
+    " Full-data input row: an operation key plus the COMPLETE component %data
+    " structure. You are not limited to a fixed field list - fill any field the
+    " BO exposes (use Ctrl+Space on -data-...). %control is set automatically for
+    " every field you actually fill.
+    TYPES: BEGIN OF ty_component_full,
+             order_internal_id     TYPE ty_create_line-%key-orderinternalid,
+             operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid,
+             data                  TYPE ty_target_line-%data,
+           END OF ty_component_full,
+           tt_component_full TYPE STANDARD TABLE OF ty_component_full WITH EMPTY KEY .
+
     " Output row: one message returned by the RAP modify / commit.
     TYPES: BEGIN OF ty_message,
              order_internal_id     TYPE ty_create_line-%key-orderinternalid,
@@ -77,6 +88,17 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
     METHODS create_components_dyn
       IMPORTING
         !it_component TYPE tt_component_dyn
+        !iv_commit    TYPE abap_boolean DEFAULT abap_true
+      EXPORTING
+        !et_message   TYPE tt_message
+        !ev_success   TYPE abap_boolean .
+
+    "! Create components from the full, typed component data structure - every
+    "! field the BO exposes can be supplied, with no fixed field list. %control
+    "! is derived automatically (on for each non-initial field).
+    METHODS create_components_full
+      IMPORTING
+        !it_component TYPE tt_component_full
         !iv_commit    TYPE abap_boolean DEFAULT abap_true
       EXPORTING
         !et_message   TYPE tt_message
@@ -221,6 +243,64 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
   ENDMETHOD.
 
 
+  METHOD create_components_full.
+
+    CLEAR: et_message, ev_success.
+    IF it_component IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    DATA lt_create TYPE tt_create.
+    DATA lv_cid    TYPE i.
+
+    " Describe the component %data structure once, to drive %control generically.
+    DATA ls_data TYPE ty_target_line-%data.
+    DATA(lt_comp) = CAST cl_abap_structdescr(
+                      cl_abap_typedescr=>describe_by_data( ls_data ) )->components.
+
+    LOOP AT it_component ASSIGNING FIELD-SYMBOL(<comp>).
+
+      ASSIGN lt_create[ KEY entity
+                        %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id
+                      ] TO FIELD-SYMBOL(<operation>).
+      IF sy-subrc <> 0.
+        INSERT VALUE #( %key-orderinternalid          = <comp>-order_internal_id
+                        %key-orderoperationinternalid = <comp>-operation_internal_id )
+               INTO TABLE lt_create ASSIGNING <operation>.
+      ENDIF.
+
+      lv_cid = lv_cid + 1.
+
+      DATA ls_target LIKE LINE OF <operation>-%target.
+      CLEAR ls_target.
+      ls_target-%cid  = |CID_{ lv_cid }|.
+      ls_target-%data = <comp>-data.
+
+      " Switch %control on for every field that was actually filled.
+      LOOP AT lt_comp ASSIGNING FIELD-SYMBOL(<c>).
+        ASSIGN COMPONENT <c>-name OF STRUCTURE ls_target-%data TO FIELD-SYMBOL(<data_val>).
+        IF sy-subrc = 0 AND <data_val> IS NOT INITIAL.
+          ASSIGN COMPONENT <c>-name OF STRUCTURE ls_target-%control TO FIELD-SYMBOL(<ctrl_val>).
+          IF sy-subrc = 0.
+            <ctrl_val> = if_abap_behv=>mk-on.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      INSERT ls_target INTO TABLE <operation>-%target.
+
+    ENDLOOP.
+
+    save_components(
+      EXPORTING it_create  = lt_create
+                iv_commit  = iv_commit
+      IMPORTING et_message = et_message
+                ev_success = ev_success ).
+
+  ENDMETHOD.
+
+
   METHOD save_components.
 
     CLEAR: et_message, ev_success.
@@ -315,6 +395,27 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
                         THEN |create_components_dyn: OK|
                         ELSE |create_components_dyn: FAILED| ) ).
     out->write( lt_message_dyn ).
+
+    " Variant 3 - full typed %data: fill ANY field the BO exposes, no fixed list.
+    DATA(lt_component_full) = VALUE tt_component_full(
+      ( order_internal_id     = '4996180'
+        operation_internal_id = '00000002'
+        data = VALUE #( material                   = 'F1190210T300UC001'
+                        billofmaterialitemcategory = 'L'
+                        requiredquantity           = 22
+                        baseunit                   = 'PLK' ) )
+    ).
+
+    create_components_full(
+      EXPORTING it_component = lt_component_full
+                iv_commit    = abap_false   " demo only - no commit
+      IMPORTING et_message   = DATA(lt_message_full)
+                ev_success   = DATA(lv_success_full) ).
+
+    out->write( COND #( WHEN lv_success_full = abap_true
+                        THEN |create_components_full: OK|
+                        ELSE |create_components_full: FAILED| ) ).
+    out->write( lt_message_full ).
 
   ENDMETHOD.
 
