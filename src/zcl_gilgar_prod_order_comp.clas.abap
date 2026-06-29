@@ -7,13 +7,16 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
 
     INTERFACES if_oo_adt_classrun .
 
-    " Behaviour-derived structures. These resolve their components straight from
-    " the RAP BO I_PRODUCTIONORDERTP, so we do NOT depend on the CDS views being
-    " released as usable data types (which is why i_productionordercomponenttp
-    " was reported as "unknown"). ty_op_create gives the operation key fields and
-    " ty_comp_create gives the component fields together with their %control flags.
-    TYPES ty_op_create   TYPE STRUCTURE FOR CREATE i_productionordertp\\productionorderoperation .
-    TYPES ty_comp_create TYPE STRUCTURE FOR CREATE i_productionordertp\\productionordercomponent .
+    " The component can only be created through the association
+    " (CREATE BY \_operationcomponent); the operation/component entities have no
+    " standalone CREATE. So we derive every type from the create-by-association
+    " table itself:
+    "   ty_create_line-%key  -> the operation key fields (orderinternalid, ...)
+    "   ty_target_line-%data -> the component fields (material, plant, ...)
+    TYPES tt_create      TYPE TABLE FOR CREATE i_productionordertp\\productionorderoperation\_operationcomponent .
+    TYPES ty_create_line TYPE LINE OF tt_create .
+    TYPES ty_target_tab  TYPE ty_create_line-%target .
+    TYPES ty_target_line TYPE LINE OF ty_target_tab .
 
     " Input row: one component to be assigned to a production order operation.
     " As an alternative to BAPI_ALM_ORDER_MAINTAIN we feed these rows into the
@@ -21,13 +24,13 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
     " are sent to the BO (driven by %control), so a row can set just the columns
     " it needs.
     TYPES: BEGIN OF ty_component,
-             order_internal_id     TYPE ty_op_create-orderinternalid,
-             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
-             material              TYPE ty_comp_create-material,
-             plant                 TYPE ty_comp_create-plant,
-             bom_item_category     TYPE ty_comp_create-billofmaterialitemcategory,
-             required_quantity     TYPE ty_comp_create-requiredquantity,
-             base_unit             TYPE ty_comp_create-baseunit,
+             order_internal_id     TYPE ty_create_line-%key-orderinternalid,
+             operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid,
+             material              TYPE ty_target_line-%data-material,
+             plant                 TYPE ty_target_line-%data-plant,
+             bom_item_category     TYPE ty_target_line-%data-billofmaterialitemcategory,
+             required_quantity     TYPE ty_target_line-%data-requiredquantity,
+             base_unit             TYPE ty_target_line-%data-baseunit,
            END OF ty_component,
            tt_component TYPE STANDARD TABLE OF ty_component WITH EMPTY KEY .
 
@@ -42,16 +45,16 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
     " Fully dynamic input row: an operation key plus an arbitrary list of
     " field name/value pairs. You decide at runtime which fields are filled.
     TYPES: BEGIN OF ty_component_dyn,
-             order_internal_id     TYPE ty_op_create-orderinternalid,
-             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
+             order_internal_id     TYPE ty_create_line-%key-orderinternalid,
+             operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid,
              fields                TYPE tt_field,
            END OF ty_component_dyn,
            tt_component_dyn TYPE STANDARD TABLE OF ty_component_dyn WITH EMPTY KEY .
 
     " Output row: one message returned by the RAP modify / commit.
     TYPES: BEGIN OF ty_message,
-             order_internal_id     TYPE ty_op_create-orderinternalid,
-             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
+             order_internal_id     TYPE ty_create_line-%key-orderinternalid,
+             operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid,
              severity              TYPE if_abap_behv_message=>t_severity,
              text                  TYPE string,
            END OF ty_message,
@@ -82,14 +85,11 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
   PROTECTED SECTION.
   PRIVATE SECTION.
 
-    "! Type for the "create by association" EML input table.
-    TYPES tt_create TYPE TABLE FOR CREATE i_productionordertp\\productionorderoperation\_operationcomponent .
-
     "! Returns (creating if needed) the parent operation row for the given key.
     METHODS get_operation_ref
       IMPORTING
-        !iv_order_internal_id     TYPE ty_op_create-orderinternalid
-        !iv_operation_internal_id TYPE ty_op_create-orderoperationinternalid
+        !iv_order_internal_id     TYPE ty_create_line-%key-orderinternalid
+        !iv_operation_internal_id TYPE ty_create_line-%key-orderoperationinternalid
       CHANGING
         !ct_create                TYPE tt_create
       RETURNING
