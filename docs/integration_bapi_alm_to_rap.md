@@ -30,11 +30,11 @@ handling — and paste the block below in its place. It consumes the already-bui
 * "Unknown column name ORDERINTERNALID".
 SELECT op~OrderInternalID,
        op~OrderOperationInternalID,
-       op~OperationNumber,
-       hdr~ManufacturingOrder AS aufnr            "*** confirm: ManufacturingOrder vs ProductionOrder
+       op~ProductionOrderOperation AS operationnumber,   "VORNR (NOT OperationNumber)
+       hdr~ProductionOrder         AS aufnr              "confirmed: element ProductionOrder
   FROM @LT_ONLINE_OFLINE AS ofl
-  INNER JOIN I_ProductionOrderTP          AS hdr ON hdr~ManufacturingOrder = ofl~aufnr
-  INNER JOIN I_ProductionOrderOperationTP AS op  ON op~OrderInternalID     = hdr~OrderInternalID
+  INNER JOIN I_ProductionOrderTP          AS hdr ON hdr~ProductionOrder = ofl~aufnr
+  INNER JOIN I_ProductionOrderOperationTP AS op  ON op~OrderInternalID  = hdr~OrderInternalID
   INTO TABLE @DATA(LT_OP_MAP).
 SORT LT_OP_MAP BY aufnr operationnumber.
 * Simpler alternative: if I_ProductionOrderOperationTP itself exposes the order
@@ -98,19 +98,17 @@ IF LT_RAP_COMP IS NOT INITIAL.
 ENDIF.
 ```
 
-## Field names to confirm in ADT (system-dependent)
-Use the **TP** views (`OrderInternalID` exists only there). Verify with Ctrl+Space:
-- `I_ProductionOrderTP`: `OrderInternalID` (confirmed) + order-number element —
-  `ManufacturingOrder` (most likely) vs `ProductionOrder`.
+## Field names (verified / to confirm)
+Use the **TP** views (`OrderInternalID` exists only there).
+- `I_ProductionOrderTP`: `OrderInternalID` and `ProductionOrder` (order number) —
+  **confirmed** via the table field list (technical name PRODUCTIONORDER).
 - `I_ProductionOrderOperationTP`: `OrderInternalID`, `OrderOperationInternalID`
-  (confirmed) + operation-number element — `OperationNumber` (likely). If it exposes the
-  order number directly, drop the header join (the "simpler alternative" above).
+  (confirmed). The operation number is **`ProductionOrderOperation`** (VORNR) —
+  `OperationNumber` does NOT exist here. Confirm in your release with SE16 on
+  `I_PRODUCTIONORDEROPERATIONTP` (the same field-list view used for the header).
 - Component `%data`: type `data-` + Ctrl+Space — confirm `storagelocation` and
   `requirementdate` exist; if not, omit those two lines. The others
   (material/plant/billofmaterialitemcategory/requiredquantity/baseunit) are proven.
-
-Fast recipe: open `I_ProductionOrderOperationTP` in ADT, Ctrl+Space in the field list,
-find the elements holding AUFNR and VORNR, and use those exact names in the SELECT.
 
 ## Notes
 - `create_components_full( iv_commit = abap_true )` runs `MODIFY ENTITIES` +
