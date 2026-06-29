@@ -7,19 +7,27 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
 
     INTERFACES if_oo_adt_classrun .
 
+    " Behaviour-derived structures. These resolve their components straight from
+    " the RAP BO I_PRODUCTIONORDERTP, so we do NOT depend on the CDS views being
+    " released as usable data types (which is why i_productionordercomponenttp
+    " was reported as "unknown"). ty_op_create gives the operation key fields and
+    " ty_comp_create gives the component fields together with their %control flags.
+    TYPES ty_op_create   TYPE STRUCTURE FOR CREATE i_productionordertp\\productionorderoperation .
+    TYPES ty_comp_create TYPE STRUCTURE FOR CREATE i_productionordertp\\productionordercomponent .
+
     " Input row: one component to be assigned to a production order operation.
     " As an alternative to BAPI_ALM_ORDER_MAINTAIN we feed these rows into the
     " RAP business object I_PRODUCTIONORDERTP. Only the fields you actually fill
     " are sent to the BO (driven by %control), so a row can set just the columns
     " it needs.
     TYPES: BEGIN OF ty_component,
-             order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
-             operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
-             material              TYPE i_productionordercomponenttp-material,
-             plant                 TYPE i_productionordercomponenttp-plant,
-             bom_item_category     TYPE i_productionordercomponenttp-billofmaterialitemcategory,
-             required_quantity     TYPE i_productionordercomponenttp-requiredquantity,
-             base_unit             TYPE i_productionordercomponenttp-baseunit,
+             order_internal_id     TYPE ty_op_create-orderinternalid,
+             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
+             material              TYPE ty_comp_create-material,
+             plant                 TYPE ty_comp_create-plant,
+             bom_item_category     TYPE ty_comp_create-billofmaterialitemcategory,
+             required_quantity     TYPE ty_comp_create-requiredquantity,
+             base_unit             TYPE ty_comp_create-baseunit,
            END OF ty_component,
            tt_component TYPE STANDARD TABLE OF ty_component WITH EMPTY KEY .
 
@@ -34,16 +42,16 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
     " Fully dynamic input row: an operation key plus an arbitrary list of
     " field name/value pairs. You decide at runtime which fields are filled.
     TYPES: BEGIN OF ty_component_dyn,
-             order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
-             operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
+             order_internal_id     TYPE ty_op_create-orderinternalid,
+             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
              fields                TYPE tt_field,
            END OF ty_component_dyn,
            tt_component_dyn TYPE STANDARD TABLE OF ty_component_dyn WITH EMPTY KEY .
 
     " Output row: one message returned by the RAP modify / commit.
     TYPES: BEGIN OF ty_message,
-             order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
-             operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
+             order_internal_id     TYPE ty_op_create-orderinternalid,
+             operation_internal_id TYPE ty_op_create-orderoperationinternalid,
              severity              TYPE if_abap_behv_message=>t_severity,
              text                  TYPE string,
            END OF ty_message,
@@ -80,8 +88,8 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
     "! Returns (creating if needed) the parent operation row for the given key.
     METHODS get_operation_ref
       IMPORTING
-        !iv_order_internal_id     TYPE i_productionorderoperationtp-orderinternalid
-        !iv_operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid
+        !iv_order_internal_id     TYPE ty_op_create-orderinternalid
+        !iv_operation_internal_id TYPE ty_op_create-orderoperationinternalid
       CHANGING
         !ct_create                TYPE tt_create
       RETURNING
