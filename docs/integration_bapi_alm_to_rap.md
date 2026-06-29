@@ -24,17 +24,21 @@ handling — and paste the block below in its place. It consumes the already-bui
 ## Replacement block
 
 ```abap
-*--- Resolve RAP internal IDs from the external order number -----------------*
-SELECT SINGLE OrderInternalID
-  FROM I_ProductionOrder
-  WHERE ProductionOrder = @LS_ONLINE_OFLINE-AUFNR     "*** confirm field name (ADT Ctrl+Space)
-  INTO @DATA(LV_ORDER_INT_ID).
-
-SELECT OperationNumber, OrderOperationInternalID
-  FROM I_ProductionOrderOperation
-  WHERE OrderInternalID = @LV_ORDER_INT_ID            "*** confirm field names
+*--- Resolve RAP internal IDs from the TP views (one SELECT for all orders) --*
+* NOTE: OrderInternalID exists ONLY on the *TP* views. Using the plain
+* I_ProductionOrder / I_ProductionOrderOperation views gives
+* "Unknown column name ORDERINTERNALID".
+SELECT op~OrderInternalID,
+       op~OrderOperationInternalID,
+       op~OperationNumber,
+       hdr~ManufacturingOrder AS aufnr            "*** confirm: ManufacturingOrder vs ProductionOrder
+  FROM @LT_ONLINE_OFLINE AS ofl
+  INNER JOIN I_ProductionOrderTP          AS hdr ON hdr~ManufacturingOrder = ofl~aufnr
+  INNER JOIN I_ProductionOrderOperationTP AS op  ON op~OrderInternalID     = hdr~OrderInternalID
   INTO TABLE @DATA(LT_OP_MAP).
-SORT LT_OP_MAP BY OperationNumber.
+SORT LT_OP_MAP BY aufnr operationnumber.
+* Simpler alternative: if I_ProductionOrderOperationTP itself exposes the order
+* number, drop the header join and filter the operation TP view directly.
 
 *--- Build the full-data component table -------------------------------------*
 DATA LT_RAP_COMP TYPE ZCL_PP_PRODUCTION_ORDER=>TT_COMPONENT_FULL.
@@ -43,7 +47,8 @@ CLEAR LT_RAP_COMP.
 LOOP AT LT_RESB INTO LS_RESB WHERE VORNR NE '0010'.
 
   READ TABLE LT_OP_MAP INTO DATA(LS_OP)
-       WITH KEY OperationNumber = LS_RESB-VORNR BINARY SEARCH.
+       WITH KEY aufnr           = LS_ONLINE_OFLINE-AUFNR
+                operationnumber = LS_RESB-VORNR BINARY SEARCH.
   CHECK SY-SUBRC = 0.
 
   DATA(LV_QTY) = COND #( WHEN LS_RESB-MEINS = 'ST'
@@ -55,7 +60,7 @@ LOOP AT LT_RESB INTO LS_RESB WHERE VORNR NE '0010'.
   PERFORM GET_LGORT USING LS_RESB-AUFPL LS_RESB-VORNR CHANGING LV_STGE.
 
   APPEND VALUE #(
-    order_internal_id     = LV_ORDER_INT_ID
+    order_internal_id     = LS_OP-OrderInternalID
     operation_internal_id = LS_OP-OrderOperationInternalID
     data = VALUE #( material                   = LS_RESB-MATNR
                     plant                      = LS_RESB-WERKS
@@ -94,11 +99,18 @@ ENDIF.
 ```
 
 ## Field names to confirm in ADT (system-dependent)
-- `I_ProductionOrder`: order-number field (`ProductionOrder` vs `ManufacturingOrder`) and `OrderInternalID`.
-- `I_ProductionOrderOperation`: `OrderInternalID`, `OrderOperationInternalID`, `OperationNumber`.
+Use the **TP** views (`OrderInternalID` exists only there). Verify with Ctrl+Space:
+- `I_ProductionOrderTP`: `OrderInternalID` (confirmed) + order-number element —
+  `ManufacturingOrder` (most likely) vs `ProductionOrder`.
+- `I_ProductionOrderOperationTP`: `OrderInternalID`, `OrderOperationInternalID`
+  (confirmed) + operation-number element — `OperationNumber` (likely). If it exposes the
+  order number directly, drop the header join (the "simpler alternative" above).
 - Component `%data`: type `data-` + Ctrl+Space — confirm `storagelocation` and
   `requirementdate` exist; if not, omit those two lines. The others
   (material/plant/billofmaterialitemcategory/requiredquantity/baseunit) are proven.
+
+Fast recipe: open `I_ProductionOrderOperationTP` in ADT, Ctrl+Space in the field list,
+find the elements holding AUFNR and VORNR, and use those exact names in the SELECT.
 
 ## Notes
 - `create_components_full( iv_commit = abap_true )` runs `MODIFY ENTITIES` +
