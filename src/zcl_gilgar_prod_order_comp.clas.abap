@@ -114,7 +114,8 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
     LOOP AT it_component ASSIGNING FIELD-SYMBOL(<comp>).
 
       " Find (or create) the parent operation row, grouping by its key.
-      ASSIGN lt_create[ %key-orderinternalid          = <comp>-order_internal_id
+      ASSIGN lt_create[ KEY entity
+                        %key-orderinternalid          = <comp>-order_internal_id
                         %key-orderoperationinternalid = <comp>-operation_internal_id
                       ] TO FIELD-SYMBOL(<operation>).
       IF sy-subrc <> 0.
@@ -176,7 +177,8 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
 
     LOOP AT it_component ASSIGNING FIELD-SYMBOL(<comp>).
 
-      ASSIGN lt_create[ %key-orderinternalid          = <comp>-order_internal_id
+      ASSIGN lt_create[ KEY entity
+                        %key-orderinternalid          = <comp>-order_internal_id
                         %key-orderoperationinternalid = <comp>-operation_internal_id
                       ] TO FIELD-SYMBOL(<operation>).
       IF sy-subrc <> 0.
@@ -233,12 +235,12 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
       REPORTED DATA(reported)
       MAPPED   DATA(mapped).
 
+    " The component reported line carries the component's own key (not the
+    " operation key), so we only surface the message itself here.
     LOOP AT reported-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp>).
       IF <comp>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <comp>-orderinternalid
-                        operation_internal_id = <comp>-orderoperationinternalid
-                        severity              = <comp>-%msg->m_severity
-                        text                  = <comp>-%msg->if_message~get_text( ) )
+        INSERT VALUE #( severity = <comp>-%msg->m_severity
+                        text     = <comp>-%msg->if_message~get_text( ) )
                INTO TABLE et_message.
       ENDIF.
     ENDLOOP.
