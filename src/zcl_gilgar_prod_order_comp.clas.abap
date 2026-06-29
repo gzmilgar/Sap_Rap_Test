@@ -7,11 +7,11 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
 
     INTERFACES if_oo_adt_classrun .
 
-    "! Input row: one component to be assigned to a production order operation.
-    "! As an alternative to BAPI_ALM_ORDER_MAINTAIN we feed these rows into the
-    "! RAP business object I_PRODUCTIONORDERTP. Only the fields you actually fill
-    "! are sent to the BO (driven by %control), so a row can set just the columns
-    "! it needs.
+    " Input row: one component to be assigned to a production order operation.
+    " As an alternative to BAPI_ALM_ORDER_MAINTAIN we feed these rows into the
+    " RAP business object I_PRODUCTIONORDERTP. Only the fields you actually fill
+    " are sent to the BO (driven by %control), so a row can set just the columns
+    " it needs.
     TYPES: BEGIN OF ty_component,
              order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
              operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
@@ -23,16 +23,16 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
            END OF ty_component,
            tt_component TYPE STANDARD TABLE OF ty_component WITH EMPTY KEY .
 
-    "! Generic field name/value pair, used by the fully dynamic variant.
-    "! NAME must match a component element (e.g. 'MATERIAL', 'REQUIREDQUANTITY').
+    " Generic field name/value pair, used by the fully dynamic variant.
+    " NAME must match a component element (e.g. 'MATERIAL', 'REQUIREDQUANTITY').
     TYPES: BEGIN OF ty_field,
              name  TYPE string,
              value TYPE string,
            END OF ty_field,
            tt_field TYPE STANDARD TABLE OF ty_field WITH EMPTY KEY .
 
-    "! Fully dynamic input row: an operation key plus an arbitrary list of
-    "! field name/value pairs. You decide at runtime which fields are filled.
+    " Fully dynamic input row: an operation key plus an arbitrary list of
+    " field name/value pairs. You decide at runtime which fields are filled.
     TYPES: BEGIN OF ty_component_dyn,
              order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
              operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
@@ -40,7 +40,7 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
            END OF ty_component_dyn,
            tt_component_dyn TYPE STANDARD TABLE OF ty_component_dyn WITH EMPTY KEY .
 
-    "! Output row: one message returned by the RAP modify / commit.
+    " Output row: one message returned by the RAP modify / commit.
     TYPES: BEGIN OF ty_message,
              order_internal_id     TYPE i_productionorderoperationtp-orderinternalid,
              operation_internal_id TYPE i_productionorderoperationtp-orderoperationinternalid,
@@ -95,13 +95,6 @@ CLASS zcl_gilgar_prod_order_comp DEFINITION
       EXPORTING
         !et_message TYPE tt_message
         !ev_success TYPE abap_boolean .
-
-    "! Collects messages out of a REPORTED structure of I_PRODUCTIONORDERTP.
-    METHODS collect_messages
-      IMPORTING
-        !is_reported TYPE RESPONSE FOR REPORTED i_productionordertp
-      CHANGING
-        !ct_message  TYPE tt_message .
 
 ENDCLASS.
 
@@ -252,8 +245,25 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
       REPORTED DATA(reported)
       MAPPED   DATA(mapped).
 
-    collect_messages( EXPORTING is_reported = reported
-                      CHANGING  ct_message  = et_message ).
+    " Messages from the interaction phase (EARLY reported).
+    LOOP AT reported-productionorderoperation ASSIGNING FIELD-SYMBOL(<op>).
+      IF <op>-%msg IS BOUND.
+        INSERT VALUE #( order_internal_id     = <op>-orderinternalid
+                        operation_internal_id = <op>-orderoperationinternalid
+                        severity              = <op>-%msg->m_severity
+                        text                  = <op>-%msg->if_message~get_text( ) )
+               INTO TABLE et_message.
+      ENDIF.
+    ENDLOOP.
+    LOOP AT reported-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp>).
+      IF <comp>-%msg IS BOUND.
+        INSERT VALUE #( order_internal_id     = <comp>-orderinternalid
+                        operation_internal_id = <comp>-orderoperationinternalid
+                        severity              = <comp>-%msg->m_severity
+                        text                  = <comp>-%msg->if_message~get_text( ) )
+               INTO TABLE et_message.
+      ENDIF.
+    ENDLOOP.
 
     IF failed IS NOT INITIAL.
       ROLLBACK ENTITIES.
@@ -269,35 +279,27 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
       FAILED   DATA(failed_commit)
       REPORTED DATA(reported_commit).
 
-    collect_messages( EXPORTING is_reported = reported_commit
-                      CHANGING  ct_message  = et_message ).
+    " Messages from the save phase (LATE reported).
+    LOOP AT reported_commit-productionorderoperation ASSIGNING FIELD-SYMBOL(<op_c>).
+      IF <op_c>-%msg IS BOUND.
+        INSERT VALUE #( order_internal_id     = <op_c>-orderinternalid
+                        operation_internal_id = <op_c>-orderoperationinternalid
+                        severity              = <op_c>-%msg->m_severity
+                        text                  = <op_c>-%msg->if_message~get_text( ) )
+               INTO TABLE et_message.
+      ENDIF.
+    ENDLOOP.
+    LOOP AT reported_commit-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp_c>).
+      IF <comp_c>-%msg IS BOUND.
+        INSERT VALUE #( order_internal_id     = <comp_c>-orderinternalid
+                        operation_internal_id = <comp_c>-orderoperationinternalid
+                        severity              = <comp_c>-%msg->m_severity
+                        text                  = <comp_c>-%msg->if_message~get_text( ) )
+               INTO TABLE et_message.
+      ENDIF.
+    ENDLOOP.
 
     ev_success = xsdbool( failed_commit IS INITIAL ).
-
-  ENDMETHOD.
-
-
-  METHOD collect_messages.
-
-    LOOP AT is_reported-productionorderoperation ASSIGNING FIELD-SYMBOL(<op>).
-      IF <op>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <op>-orderinternalid
-                        operation_internal_id = <op>-orderoperationinternalid
-                        severity              = <op>-%msg->m_severity
-                        text                  = <op>-%msg->if_message~get_text( ) )
-               INTO TABLE ct_message.
-      ENDIF.
-    ENDLOOP.
-
-    LOOP AT is_reported-productionordercomponent ASSIGNING FIELD-SYMBOL(<comp>).
-      IF <comp>-%msg IS BOUND.
-        INSERT VALUE #( order_internal_id     = <comp>-orderinternalid
-                        operation_internal_id = <comp>-orderoperationinternalid
-                        severity              = <comp>-%msg->m_severity
-                        text                  = <comp>-%msg->if_message~get_text( ) )
-               INTO TABLE ct_message.
-      ENDIF.
-    ENDLOOP.
 
   ENDMETHOD.
 
