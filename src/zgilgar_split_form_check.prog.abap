@@ -210,6 +210,17 @@ CLASS lcl_app DEFINITION.
     METHODS get_fm_interface
       IMPORTING iv_form         TYPE string
       RETURNING VALUE(rt_param) TYPE tt_param.
+    METHODS is_class
+      IMPORTING iv_prog       TYPE programm
+      RETURNING VALUE(rv_yes) TYPE abap_bool.
+    METHODS get_method_source
+      IMPORTING iv_class  TYPE programm
+                iv_method TYPE string
+      RETURNING VALUE(rt) TYPE string_table.
+    METHODS get_method_interface
+      IMPORTING iv_class        TYPE programm
+                iv_method       TYPE string
+      RETURNING VALUE(rt_param) TYPE tt_param.
     METHODS compare_fm
       IMPORTING it_fm     TYPE tt_param
                 it_z      TYPE tt_param
@@ -317,6 +328,24 @@ CLASS lcl_app IMPLEMENTATION.
         ELSE.
           ls_res-status = 'PERFORM BULUNAMADI'.
           ls_res-detail = 'Dinamik PERFORM yok, FM arayuzu da okunamadi'.
+        ENDIF.
+
+      ELSEIF lv_kind = 'METHOD'.
+        " --- METHOD arayuzu modu: PERFORM yok, kaynak bir SE24 sinif metodu ---
+        DATA(lt_meth) = get_method_interface( iv_class  = ls_hdr-sprog
+                                              iv_method = CONV #( ls_hdr-sform ) ).
+        IF lt_meth IS NOT INITIAL.
+          ls_res-mode = 'METHOD'.
+          compare_fm( EXPORTING it_fm     = lt_meth
+                                it_z      = lt_z
+                      IMPORTING ev_status = ls_res-status
+                                ev_detail = ls_res-detail ).
+          IF ls_res-status = 'ESLESIYOR'.
+            lv_ok = abap_true.
+          ENDIF.
+        ELSE.
+          ls_res-status = 'PERFORM BULUNAMADI'.
+          ls_res-detail = 'Dinamik PERFORM yok, metot arayuzu da okunamadi'.
         ENDIF.
 
       ELSE.
@@ -663,9 +692,10 @@ CLASS lcl_app IMPLEMENTATION.
 
     CLEAR: ev_found, ev_kind, ev_u, ev_c, ev_t, ev_raw.
 
-    " Kaynagi sinifla: sform once TFDIR'de FM mi? FM ise FM'in gercek
-    " function-grup programinda (PNAME) aranir; degilse FORM olarak sprog'ta.
-    " FORM da bulunamazsa FM kabul edilir (bos -> FM).
+    " Kaynagi sinifla (sprog/sform):
+    "  * sprog bir SINIF ise -> METHOD (SE24 class method)
+    "  * sform TFDIR'de FM ise -> FM (FM'in gercek function-grup PNAME'inde aranir)
+    "  * aksi halde -> FORM (sprog icinde); bulunamazsa FM kabul edilir.
     get_fm_prog( EXPORTING iv_form  = iv_form
                  IMPORTING ev_is_fm = DATA(lv_is_fm)
                            ev_prog  = DATA(lv_fm_prog) ).
@@ -673,7 +703,11 @@ CLASS lcl_app IMPLEMENTATION.
     DATA lt_comb TYPE string_table.
     DATA lv_unit TYPE abap_bool.
 
-    IF lv_is_fm = abap_true.
+    IF is_class( iv_prog ) = abap_true.
+      ev_kind = 'METHOD'.
+      lt_comb = get_method_source( iv_class = iv_prog iv_method = iv_form ).
+      lv_unit = xsdbool( lt_comb IS NOT INITIAL ).
+    ELSEIF lv_is_fm = abap_true.
       ev_kind = 'FM'.
       collect_unit_source( EXPORTING iv_prog    = lv_fm_prog
                                      iv_form    = iv_form
@@ -857,6 +891,67 @@ CLASS lcl_app IMPLEMENTATION.
     INSERT VALUE #( func = lv_func_s params = rt_param ) INTO TABLE mt_ficache.
   ENDMETHOD.
 
+  METHOD is_class.
+    SELECT SINGLE clsname FROM seoclass INTO @DATA(lv_dummy)
+      WHERE clsname = @iv_prog.
+    rv_yes = xsdbool( sy-subrc = 0 ).
+  ENDMETHOD.
+
+  METHOD get_method_source.
+    " Metot include'unu CL_OO_CLASSNAME_SERVICE ile bul, (enhanced) oku.
+    DATA(lv_method_u) = to_upper( condense( iv_method ) ).
+
+    DATA lt_inc TYPE seop_methods_w_include.
+    CALL METHOD cl_oo_classname_service=>get_all_method_includes
+      EXPORTING
+        clsname            = CONV seoclsname( iv_class )
+      RECEIVING
+        result             = lt_inc
+      EXCEPTIONS
+        class_not_existing = 1
+        OTHERS             = 2.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    READ TABLE lt_inc INTO DATA(ls_inc)
+         WITH KEY cpdkey-cpdname = lv_method_u.
+    IF sy-subrc = 0.
+      rt = read_src( CONV programm( ls_inc-incname ) ).
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD get_method_interface.
+    " SE24 metot parametre arayuzu (RTTI). Tip bos birakilir -> compare_fm
+    " sadece ISIM bazli (parametre var/yok) kontrol eder.
+    TRY.
+        DATA(lo_obj) = CAST cl_abap_objectdescr(
+          cl_abap_typedescr=>describe_by_name( CONV string( iv_class ) ) ).
+
+        READ TABLE lo_obj->methods INTO DATA(ls_m)
+             WITH KEY name = to_upper( condense( iv_method ) ).
+        IF sy-subrc <> 0.
+          RETURN.
+        ENDIF.
+
+        LOOP AT ls_m-parameters INTO DATA(ls_p).
+          DATA(lv_kind) = SWITCH string( ls_p-parm_kind
+            WHEN cl_abap_objectdescr=>importing THEN 'IMPORTING'
+            WHEN cl_abap_objectdescr=>exporting THEN 'EXPORTING'
+            WHEN cl_abap_objectdescr=>changing  THEN 'CHANGING'
+            WHEN cl_abap_objectdescr=>returning THEN 'RETURNING'
+            ELSE space ).
+          IF lv_kind IS INITIAL.
+            CONTINUE.
+          ENDIF.
+          APPEND VALUE #( kind = lv_kind
+                          name = to_upper( CONV string( ls_p-name ) ) ) TO rt_param.
+        ENDLOOP.
+      CATCH cx_root.
+        CLEAR rt_param.
+    ENDTRY.
+  ENDMETHOD.
+
   METHOD compare_fm.
     " Z form parametrelerini (it_z) kaynak FM arayuzu (it_fm) ile ISIM bazli
     " karsilastir. Kind (USING/IMPORTING...) yok sayilir; enhancement FM
@@ -956,10 +1051,12 @@ CLASS lcl_app IMPLEMENTATION.
     ENDIF.
 
     CASE iv_col.
-      WHEN 'SFORM' OR 'SPROG' OR 'SRC_KIND'.
-        " kaynak: FM ise SE37, FORM ise kaynak program
+      WHEN 'SFORM' OR 'SPROG' OR 'SRC_KIND' OR 'MODE'.
+        " kaynak: FM ise SE37, METHOD ise SE24 sinifi, FORM ise kaynak program
         IF ls-src_kind = 'FM'.
           navigate( iv_type = 'FUNC' iv_name = ls-sform ).
+        ELSEIF ls-src_kind = 'METHOD'.
+          navigate( iv_type = 'CLAS' iv_name = CONV string( ls-sprog ) ).
         ELSE.
           navigate( iv_type = 'PROG' iv_name = CONV string( ls-sprog ) ).
         ENDIF.
