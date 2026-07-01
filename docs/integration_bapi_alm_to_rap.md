@@ -171,6 +171,42 @@ The new task has no classic CO buffer, so the handler loads the order cleanly; t
 commits in the new task's own LUW. If even this dumps, capture ST22 **Active Calls/Events**
 + **Source Code Extract** — the fix is then an SAP Note / release-specific restriction.
 
+## Wrapping the call in a function module (ZPP_FM_CREATE_ORDER_COMPONENTS)
+If you encapsulate the RAP call in a FM, HOW you call it depends on whether Tier 1 fixed
+the dump:
+
+**Case A — Tier 1 reset fixed it → a normal (same-session) FM call is enough** (no RFC):
+```abap
+CALL FUNCTION 'DEQUEUE_ALL'.
+CALL FUNCTION 'CO_ZF_DATA_RESET_COMPLETE'
+  EXPORTING i_no_ocm_reset = ' ' i_status_reset = 'X'.
+CALL FUNCTION 'ZPP_FM_CREATE_ORDER_COMPONENTS'
+  EXPORTING it_component = lt_rap_comp     "class TT_COMPONENT / TT_COMPONENT_FULL is fine here
+            iv_commit    = abap_true
+  IMPORTING et_message   = DATA(lt_msg)
+            ev_success   = DATA(lv_ok).
+```
+A same-session FM adds nothing over calling the class directly — it only matters with the
+Tier-1 reset in front of it.
+
+**Case B — need a separate session → the FM must be Remote-Enabled with DDIC-only params.**
+`STARTING NEW TASK` / `DESTINATION 'NONE'` reject class/program-local types in the RFC
+interface, so change `IT_COMPONENT` to a DDIC table type (e.g. `ZPP_TT_PO_COMPONENT`) and
+`ET_MESSAGE` to `BAPIRET2_T`, map DDIC↔class inside the FM, then call it — simplest is
+synchronous `DESTINATION 'NONE'`:
+```abap
+CALL FUNCTION 'DEQUEUE_ALL'.                       "main session still holds the classic lock
+CALL FUNCTION 'ZPP_FM_CREATE_ORDER_COMPONENTS'
+  DESTINATION 'NONE'                               "fresh session, synchronous, results back
+  EXPORTING it_component = lt_comp_ddic
+            iv_commit    = abap_true
+  IMPORTING et_message   = DATA(lt_ret)
+            ev_success   = DATA(lv_ok)
+  EXCEPTIONS system_failure = 1 MESSAGE DATA(lv_sysmsg)
+             communication_failure = 2 MESSAGE DATA(lv_commsg)
+             OTHERS = 3.
+```
+
 ## Verification
 1. Activate class + program.
 2. Run the report, upload the Excel template, select rows with an online scenario, press CREATE.
