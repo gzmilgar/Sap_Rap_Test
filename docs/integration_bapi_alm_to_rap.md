@@ -207,6 +207,130 @@ CALL FUNCTION 'ZPP_FM_CREATE_ORDER_COMPONENTS'
              OTHERS = 3.
 ```
 
+## STARTING NEW TASK + result collection (full pattern)
+Resolve the internal IDs **inside** the FM (in the fresh session) and pass only external keys,
+so the RFC interface uses standard DDIC data elements only.
+
+**DDIC to create:** structure `ZPP_S_PO_COMP_EXT` (`VORNR TYPE VORNR`, `MATERIAL TYPE MATNR`,
+`PLANT TYPE WERKS_D`, `POSTP TYPE POSTP`, `MENGE TYPE MENGE_D`, `MEINS TYPE MEINS`,
+`LGORT TYPE LGORT_D`, `BDTER TYPE BDTER`) + table type `ZPP_TT_PO_COMP_EXT`. Messages use
+standard `BAPIRET2_T`.
+
+**FM `ZPP_FM_CREATE_ORDER_COMPONENTS` — Remote-Enabled:**
+```abap
+*"  IMPORTING VALUE(IV_ORDER)  TYPE AUFNR
+*"            VALUE(IT_COMP)   TYPE ZPP_TT_PO_COMP_EXT
+*"            VALUE(IV_COMMIT) TYPE ABAP_BOOLEAN DEFAULT ABAP_TRUE
+*"  EXPORTING VALUE(EV_SUCCESS) TYPE ABAP_BOOLEAN
+*"            VALUE(ET_MESSAGE) TYPE BAPIRET2_T
+FUNCTION zpp_fm_create_order_components.
+  SELECT manufacturingorder          AS aufnr,
+         manufacturingorderoperation AS vornr,
+         mfgorderinternalid          AS order_internal_id,
+         orderoperationinternalid
+    FROM i_manufacturingorderoperation
+    WHERE manufacturingorder = @iv_order
+    INTO TABLE @DATA(lt_op_map).
+  SORT lt_op_map BY vornr.
+
+  DATA lt_comp TYPE zcl_pp_production_order=>tt_component_full.
+  LOOP AT it_comp INTO DATA(ls_c).
+    READ TABLE lt_op_map INTO DATA(ls_op) WITH KEY vornr = ls_c-vornr BINARY SEARCH.
+    CHECK sy-subrc = 0.
+    APPEND VALUE #(
+      order_internal_id     = ls_op-order_internal_id
+      operation_internal_id = ls_op-orderoperationinternalid
+      data = VALUE #( material                   = ls_c-material
+                      plant                      = ls_c-plant
+                      billofmaterialitemcategory = ls_c-postp
+                      requiredquantity           = ls_c-menge
+                      baseunit                   = ls_c-meins
+                      storagelocation            = ls_c-lgort
+                      requirementdate            = ls_c-bdter ) ) TO lt_comp.
+  ENDLOOP.
+
+  DATA(lo_po) = NEW zcl_pp_production_order( ).
+  lo_po->create_components_full(
+    EXPORTING it_component = lt_comp
+              iv_commit    = iv_commit
+    IMPORTING et_message   = DATA(lt_msg)
+              ev_success   = ev_success ).
+
+  LOOP AT lt_msg INTO DATA(ls_msg).
+    APPEND VALUE #( type = ls_msg-severity message = ls_msg-text ) TO et_message.
+  ENDLOOP.
+ENDFUNCTION.
+```
+
+**Program globals** (top include — the aRFC callback is a FORM):
+```abap
+DATA: gv_rap_done TYPE abap_bool,
+      gv_rap_ok   TYPE abap_bool,
+      gt_rap_ret  TYPE bapiret2_t.
+```
+
+**Async call + WAIT** (per order, inside `LOOP AT lt_online_ofline`):
+```abap
+DATA lt_comp_ext TYPE zpp_tt_po_comp_ext.
+CLEAR lt_comp_ext.
+LOOP AT lt_resb INTO ls_resb WHERE vornr NE '0010'.
+  DATA(lv_qty) = COND menge_d( WHEN ls_resb-meins = 'ST'
+                               THEN ceil( ls_resb-bdmng ) ELSE ls_resb-bdmng ).
+  DATA lv_stge TYPE lgort_d.
+  CLEAR lv_stge.
+  PERFORM get_lgort USING ls_resb-aufpl ls_resb-vornr CHANGING lv_stge.
+  APPEND VALUE #( vornr = ls_resb-vornr material = ls_resb-matnr plant = ls_resb-werks
+                  postp = ls_resb-postp menge = lv_qty meins = ls_resb-meins
+                  lgort = lv_stge bdter = ls_resb-bdter ) TO lt_comp_ext.
+ENDLOOP.
+
+IF lt_comp_ext IS NOT INITIAL.
+  CALL FUNCTION 'DEQUEUE_ALL'.
+  gv_rap_done = abap_false.
+  CLEAR: gv_rap_ok, gt_rap_ret.
+
+  CALL FUNCTION 'ZPP_FM_CREATE_ORDER_COMPONENTS'
+    STARTING NEW TASK 'RAPCOMP'
+    PERFORMING receive_rap_result ON END OF TASK
+    EXPORTING iv_order = ls_online_ofline-aufnr
+              it_comp  = lt_comp_ext
+              iv_commit = abap_true
+    EXCEPTIONS communication_failure = 1 system_failure = 2
+               resource_failure = 3 OTHERS = 4.
+  IF sy-subrc <> 0.
+    gv_rap_done = abap_true.
+  ENDIF.
+
+  WAIT UNTIL gv_rap_done = abap_true UP TO 60 SECONDS.
+
+  READ TABLE gt_alv ASSIGNING FIELD-SYMBOL(<lfs_alv>)
+       WITH KEY order_number = ls_online_ofline-aufnr.
+  IF sy-subrc = 0.
+    IF gv_rap_ok = abap_true.
+      MESSAGE ID 'ZPP_1' TYPE 'S' NUMBER '009' INTO DATA(lv_mes).
+      <lfs_alv>-message = |{ <lfs_alv>-message }{ lv_mes }|.
+    ELSE.
+      <lfs_alv>-icon = gc_red.
+      <lfs_alv>-message = |{ <lfs_alv>-message }{ VALUE #( gt_rap_ret[ type = 'E' ]-message OPTIONAL ) }|.
+    ENDIF.
+  ENDIF.
+ENDIF.
+```
+
+**Callback FORM** (in the report's FORM section):
+```abap
+FORM receive_rap_result USING p_task TYPE clike.
+  RECEIVE RESULTS FROM FUNCTION 'ZPP_FM_CREATE_ORDER_COMPONENTS'
+    IMPORTING ev_success = gv_rap_ok
+              et_message = gt_rap_ret
+    EXCEPTIONS communication_failure = 1 system_failure = 2 OTHERS = 3.
+  gv_rap_done = abap_true.
+ENDFORM.
+```
+`STARTING NEW TASK 'RAPCOMP'` (no DESTINATION) uses a free local dialog work process = a fresh
+session with no classic CO buffer; `WAIT UNTIL` drives the aRFC reply. Reusing the task name is
+fine because we `WAIT` before the next iteration. The create commits in the new task's own LUW.
+
 ## Verification
 1. Activate class + program.
 2. Run the report, upload the Excel template, select rows with an online scenario, press CREATE.
