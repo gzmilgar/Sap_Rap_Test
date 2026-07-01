@@ -305,12 +305,20 @@ CLASS zcl_gilgar_prod_order_comp IMPLEMENTATION.
 
     CLEAR: et_message, ev_success.
 
-    " FROM (instead of FIELDS ( ... )) makes the BO honour %control, so each row
-    " only sets the fields that were flagged on.
+    " Explicit FIELDS ( ... ) form: on this standard/unmanaged MFG-order BO the
+    " FROM/%control form does not actually create the component, whereas the
+    " field-list form (as used by the working direct EML) does. Add further
+    " fields to the list once their element names are confirmed.
     MODIFY ENTITIES OF i_productionordertp
       ENTITY productionorderoperation
       CREATE BY \_operationcomponent
-      FROM it_create
+      AUTO FILL CID
+      FIELDS ( material
+               plant
+               billofmaterialitemcategory
+               requiredquantity
+               baseunit )
+      WITH it_create
       FAILED   DATA(failed)
       REPORTED DATA(reported)
       MAPPED   DATA(mapped).
