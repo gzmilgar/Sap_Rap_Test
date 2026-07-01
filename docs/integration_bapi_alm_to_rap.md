@@ -76,13 +76,12 @@ ENDLOOP.
 *--- Call the RAP wrapper class and surface messages on the ALV --------------*
 IF LT_RAP_COMP IS NOT INITIAL.
 
-  " Clear the classic order context (locks left by BAPI_PRODORD_* /
-  " CO_SE_PRODORD_CHANGE) so the standard MFG-order RAP handler
-  " (CL_PPRAP_MFGORDER_BILHDLR) can load/lock the order without ASSERTION_FAILED.
+  " Tier-1 dump fix: clear the classic order context (locks + CO buffer/status
+  " left by BAPI_PRODORD_* / CO_SE_PRODORD_CHANGE) so the standard MFG-order RAP
+  " handler (CL_PPRAP_MFGORDER_BILHDLR) can load/lock the order without ASSERTION_FAILED.
   CALL FUNCTION 'DEQUEUE_ALL'.
-  " If it still dumps, also reset the classic order buffer/status before the call:
-  " CALL FUNCTION 'CO_ZF_DATA_RESET_COMPLETE'
-  "   EXPORTING i_no_ocm_reset = ' ' i_status_reset = 'X'.
+  CALL FUNCTION 'CO_ZF_DATA_RESET_COMPLETE'
+    EXPORTING i_no_ocm_reset = ' ' i_status_reset = 'X'.
 
   DATA(LO_PO) = NEW ZCL_PP_PRODUCTION_ORDER( ).
   LO_PO->CREATE_COMPONENTS_FULL(
@@ -132,12 +131,45 @@ Use the **TP** views (`OrderInternalID` exists only there).
 A bare `ASSERT` in the standard MFG-order RAP handler (component PP-SFC) happens when the
 RAP BO is called right after classic order processing (`BAPI_PRODORD_*`,
 `CO_SE_PRODORD_CHANGE`) in the same session — the order is still locked/buffered
-classically when the RAP handler tries to load and lock it.
-- First fix (applied above): `CALL FUNCTION 'DEQUEUE_ALL'.` before the RAP call.
-- If it still dumps: add `CO_ZF_DATA_RESET_COMPLETE` (status reset) before the call, and
-  capture ST22 **Active Calls/Events** + **Source Code Extract** to identify the exact
-  asserting method. The definitive fix may be an SAP Note or running the RAP create in a
-  separate task/LUW (`STARTING NEW TASK`).
+classically when the RAP handler tries to load and lock it. **Confirmed by isolation: the
+class works standalone from SE24 and only dumps when called inside the program**, i.e. the
+keys/fields are correct; it is a same-session context conflict.
+
+**Tier 1 (applied above):** before the RAP call, release locks and reset the classic order
+buffer:
+```abap
+CALL FUNCTION 'DEQUEUE_ALL'.
+CALL FUNCTION 'CO_ZF_DATA_RESET_COMPLETE'
+  EXPORTING i_no_ocm_reset = ' ' i_status_reset = 'X'.
+```
+
+**Tier 2 (if Tier 1 still dumps): run the RAP create in a fresh session via STARTING NEW TASK.**
+Wrap "resolve IDs + call the class" in an RFC-enabled FM `Z_PP_CREATE_ORDER_COMPONENTS`
+(DDIC-typed params: `IV_ORDER TYPE AUFNR`, a flat `IT_COMP` table type, `EV_SUCCESS`,
+`ET_MESSAGE`). The FM resolves the internal IDs from `I_ManufacturingOrderOperation`, calls
+`create_components_full( iv_commit = abap_true )` and returns messages. Call it async and
+collect the result:
+```abap
+CALL FUNCTION 'DEQUEUE_ALL'.                 "main session still holds the classic lock
+DATA gv_rap_done TYPE abap_bool.
+CALL FUNCTION 'Z_PP_CREATE_ORDER_COMPONENTS'
+  STARTING NEW TASK 'RAPCOMP'
+  PERFORMING receive_rap_result ON END OF TASK
+  EXPORTING iv_order = ls_online_ofline-aufnr
+            it_comp  = lt_comp_ext.
+WAIT UNTIL gv_rap_done = abap_true UP TO 30 SECONDS.
+
+FORM receive_rap_result USING p_task TYPE clike.
+  RECEIVE RESULTS FROM FUNCTION 'Z_PP_CREATE_ORDER_COMPONENTS'
+    IMPORTING ev_success = gv_rap_ok
+              et_message = gt_rap_msg
+    EXCEPTIONS system_failure = 1 communication_failure = 2 OTHERS = 3.
+  gv_rap_done = abap_true.
+ENDFORM.
+```
+The new task has no classic CO buffer, so the handler loads the order cleanly; the create
+commits in the new task's own LUW. If even this dumps, capture ST22 **Active Calls/Events**
++ **Source Code Extract** — the fix is then an SAP Note / release-specific restriction.
 
 ## Verification
 1. Activate class + program.
