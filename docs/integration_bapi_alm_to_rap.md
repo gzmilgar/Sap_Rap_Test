@@ -76,6 +76,14 @@ ENDLOOP.
 *--- Call the RAP wrapper class and surface messages on the ALV --------------*
 IF LT_RAP_COMP IS NOT INITIAL.
 
+  " Clear the classic order context (locks left by BAPI_PRODORD_* /
+  " CO_SE_PRODORD_CHANGE) so the standard MFG-order RAP handler
+  " (CL_PPRAP_MFGORDER_BILHDLR) can load/lock the order without ASSERTION_FAILED.
+  CALL FUNCTION 'DEQUEUE_ALL'.
+  " If it still dumps, also reset the classic order buffer/status before the call:
+  " CALL FUNCTION 'CO_ZF_DATA_RESET_COMPLETE'
+  "   EXPORTING i_no_ocm_reset = ' ' i_status_reset = 'X'.
+
   DATA(LO_PO) = NEW ZCL_PP_PRODUCTION_ORDER( ).
   LO_PO->CREATE_COMPONENTS_FULL(
     EXPORTING IT_COMPONENT = LT_RAP_COMP
@@ -117,8 +125,19 @@ Use the **TP** views (`OrderInternalID` exists only there).
 - The operations are created/committed earlier in the same method
   (`CO_SE_PRODORD_CHANGE` + commit), so the CDS read returns them. If buffering bites,
   add a short `WAIT` or read the operations via `READ ENTITIES OF i_productionordertp`.
-- If `OrderInternalID` equals `AUFNR` in this system, the first SELECT can be replaced
-  by a direct assignment.
+- Both internal IDs come straight from `I_ProductionOrderOperationTP`, so no assumption
+  about `OrderInternalID = AUFNR` is made.
+
+## Troubleshooting: ASSERTION_FAILED in CL_PPRAP_MFGORDER_BILHDLR
+A bare `ASSERT` in the standard MFG-order RAP handler (component PP-SFC) happens when the
+RAP BO is called right after classic order processing (`BAPI_PRODORD_*`,
+`CO_SE_PRODORD_CHANGE`) in the same session — the order is still locked/buffered
+classically when the RAP handler tries to load and lock it.
+- First fix (applied above): `CALL FUNCTION 'DEQUEUE_ALL'.` before the RAP call.
+- If it still dumps: add `CO_ZF_DATA_RESET_COMPLETE` (status reset) before the call, and
+  capture ST22 **Active Calls/Events** + **Source Code Extract** to identify the exact
+  asserting method. The definitive fix may be an SAP Note or running the RAP create in a
+  separate task/LUW (`STARTING NEW TASK`).
 
 ## Verification
 1. Activate class + program.
